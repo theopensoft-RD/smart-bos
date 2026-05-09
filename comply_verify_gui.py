@@ -1766,6 +1766,23 @@ def apply_pdf_edits(pdf_path: Path, edits: list[dict]) -> dict:
                     info = ann.info
                     info["content"] = str(edit["contents"])
                     ann.set_info(info)
+                # Re-assert standard appearance so legacy annotations
+                # (saved with default colors / no explicit stroke) pick up
+                # the red theme next time the user edits them.
+                try:
+                    kind = ann.type[1] if isinstance(ann.type, tuple) else str(ann.type)
+                except Exception:
+                    kind = ""
+                if kind == "Square":
+                    try:
+                        ann.set_colors(stroke=(1, 0, 0))
+                        ann.set_border(width=1)
+                    except Exception: pass
+                elif kind == "FreeText":
+                    try:
+                        # In PyMuPDF FreeText, "stroke" is the TEXT color
+                        ann.set_colors(stroke=(1, 0, 0))
+                    except Exception: pass
                 ann.update()
                 applied += 1
 
@@ -1798,14 +1815,27 @@ def apply_pdf_edits(pdf_path: Path, edits: list[dict]) -> dict:
                     a.set_info(info)
                     a.update()
                 elif ann_type == "FreeText":
+                    # Compute fontsize from rect height if not provided —
+                    # matches the SVG overlay's clamp formula so what the
+                    # user sees in edit mode is what they get on disk.
+                    rect_h = max(0.0, rect.y1 - rect.y0)
+                    default_fs = max(6.0, min(14.0, rect_h * 0.65))
+                    fs_raw = edit.get("fontsize")
+                    fs = float(fs_raw) if fs_raw not in (None, "") else default_fs
+                    fs = max(6.0, min(14.0, fs))
+                    # NOTE: PyMuPDF rejects border_color/fill_color unless
+                    # rich_text=True. We deliberately render FreeText labels
+                    # WITHOUT a border — the SVG overlay matches by drawing
+                    # a transparent label rect (just the red text shows).
+                    # The paired Square already provides the visible frame.
                     a = page.add_freetext_annot(
                         rect,
                         str(edit.get("contents", "")),
-                        fontsize=int(edit.get("fontsize", 9)),
+                        fontsize=fs,
+                        fontname="helv",
                         text_color=(1, 0, 0),
                         align=0,
                     )
-                    # Force red bold appearance string
                     a.set_info({"content": str(edit.get("contents", ""))})
                     a.update()
                 else:
@@ -3082,7 +3112,8 @@ def api_manual_save():
     # Pre-snapshot
     _run_version_cmd(["snap", f"pre-manual-row-{row_num}"], timeout=60)
 
-    # Apply PDF edits — Square + FreeText pair
+    # Apply PDF edits — Square + FreeText pair. fontsize is left to
+    # apply_pdf_edits which clamps from rect height (matches SVG overlay).
     edits = [
         {"action": "create", "page": page, "type": "Square",
          "rect": content_rect, "contents": ""},
@@ -5166,10 +5197,39 @@ select { cursor: pointer; }
 .pdf-overlay.editable { pointer-events: all; }
 .pdf-overlay g.annot { pointer-events: all; cursor: pointer; }
 .pdf-overlay g.annot.selected { cursor: move; }
-.pdf-overlay rect.ann-rect { fill: transparent; stroke: rgba(255,0,0,0.85); stroke-width: 1; }
-.pdf-overlay rect.ann-rect.freetext { stroke: rgba(255,0,0,0.4); stroke-dasharray: 3 2; }
+/* Annotation rendering — must match what apply_pdf_edits writes to disk
+   so edit-mode preview === saved PDF. Stroke 1pt red solid for both
+   Square and FreeText (PyMuPDF border_color=(1,0,0), set_border(width=1)). */
+.pdf-overlay rect.ann-rect {
+  fill: transparent;
+  stroke: rgb(255, 0, 0);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.pdf-overlay rect.ann-rect.freetext {
+  /* PyMuPDF FreeText has no border by default (border_color requires
+     rich_text). To stay WYSIWYG with the saved PDF we draw a faint
+     dotted outline ONLY in edit mode (so the user can still grab the
+     label rect to resize) — view mode picks up the saved-PDF render
+     which has no border. */
+  fill: transparent;
+  stroke: rgba(255, 0, 0, 0.25);
+  stroke-width: 0.5;
+  stroke-dasharray: 1 2;
+}
+.pdf-overlay g.annot.selected rect.ann-rect.freetext {
+  stroke: var(--c-warn);
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
 .pdf-overlay g.annot.selected rect.ann-rect { stroke: var(--c-warn); stroke-width: 2; }
-.pdf-overlay text.ann-text { fill: red; font-weight: bold; user-select: none; pointer-events: none; }
+.pdf-overlay text.ann-text {
+  fill: rgb(255, 0, 0);
+  /* Helvetica family — closest to PyMuPDF's "helv" rendered glyphs */
+  font-family: Helvetica, "Helvetica Neue", Arial, sans-serif;
+  font-weight: normal;
+  user-select: none; pointer-events: none;
+}
 .pdf-overlay rect.ann-hit { fill: rgba(0,0,0,0); stroke: none; }
 .pdf-overlay rect.ann-hit:hover { fill: rgba(245,158,11,0.18); }
 .pdf-overlay g.annot.selected rect.ann-hit { fill: rgba(245,158,11,0.10); }
@@ -8235,6 +8295,13 @@ function refreshOverlay() {
   renderAnnots();
 }
 
+// Compute the FreeText fontsize from rect height — must mirror the
+// backend's apply_pdf_edits formula so edit-mode preview === saved PDF.
+function freetextFontSize(rect) {
+  const h = Math.max(0, rect[3] - rect[1]);
+  return Math.max(6, Math.min(14, h * 0.65));
+}
+
 function buildAnnotNode(a) {
   const NS = 'http://www.w3.org/2000/svg';
   const g = document.createElementNS(NS, 'g');
@@ -8242,32 +8309,39 @@ function buildAnnotNode(a) {
   g.dataset.id = a._id;
   if (a._id === SELECTED_ANN_ID) g.classList.add('selected');
   const [x0, y0, x1, y1] = a.rect;
+  const w = Math.max(0.5, x1 - x0);
+  const h = Math.max(0.5, y1 - y0);
   // Visible outline rect
   const rect = document.createElementNS(NS, 'rect');
   rect.classList.add('ann-rect');
   if (a.type === 'FreeText') rect.classList.add('freetext');
   rect.setAttribute('x', x0); rect.setAttribute('y', y0);
-  rect.setAttribute('width', Math.max(0.5, x1 - x0));
-  rect.setAttribute('height', Math.max(0.5, y1 - y0));
+  rect.setAttribute('width', w);
+  rect.setAttribute('height', h);
   g.appendChild(rect);
   // Hit area (slightly larger, transparent fill — enables click + hover)
   const hit = document.createElementNS(NS, 'rect');
   hit.classList.add('ann-hit');
   hit.setAttribute('x', x0); hit.setAttribute('y', y0);
-  hit.setAttribute('width', Math.max(0.5, x1 - x0));
-  hit.setAttribute('height', Math.max(0.5, y1 - y0));
+  hit.setAttribute('width', w);
+  hit.setAttribute('height', h);
   g.appendChild(hit);
-  // FreeText label
+  // FreeText label — render to match PyMuPDF's add_freetext_annot output
   if (a.type === 'FreeText' && a.contents) {
-    const fontSize = Math.min(12, Math.max(6, (y1 - y0) * 0.7));
-    // Multi-line: split by \n
+    const fontSize = freetextFontSize(a.rect);
     const lines = a.contents.split('\n');
+    // PyMuPDF insets text ~2pt from the rect edges; use hanging baseline so
+    // 'y' anchors at the TOP of the glyph box (mirrors PyMuPDF's text origin).
+    const PAD_X = 2;
+    const PAD_Y = 2;
+    const lineH = fontSize * 1.15;
     for (let i = 0; i < lines.length; i++) {
       const t = document.createElementNS(NS, 'text');
       t.classList.add('ann-text');
-      t.setAttribute('x', x0 + 2);
-      t.setAttribute('y', y0 + fontSize * (i + 0.95));
+      t.setAttribute('x', x0 + PAD_X);
+      t.setAttribute('y', y0 + PAD_Y + i * lineH);
       t.setAttribute('font-size', fontSize);
+      t.setAttribute('dominant-baseline', 'hanging');
       t.textContent = lines[i];
       g.appendChild(t);
     }
@@ -8577,8 +8651,12 @@ function computeEditDiff() {
   const edits = [];
   for (const a of EDIT_ANNOTS) {
     if (a._isNew && !a._deleted) {
-      edits.push({action:'create', client_id: a._id, page: a.page,
-                  type: a.type, rect: a.rect, contents: a.contents});
+      const e = {action:'create', client_id: a._id, page: a.page,
+                 type: a.type, rect: a.rect, contents: a.contents};
+      // Pin fontsize for FreeText so the saved PDF text size matches the
+      // SVG overlay the user just saw. Same formula as freetextFontSize().
+      if (a.type === 'FreeText') e.fontsize = freetextFontSize(a.rect);
+      edits.push(e);
     } else if (!a._isNew && a._deleted) {
       edits.push({action:'delete', xref: a.xref});
     } else if (!a._isNew && !a._deleted) {
