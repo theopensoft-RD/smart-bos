@@ -1889,6 +1889,20 @@ def index():
 def api_index():
     rows_payload = []
     for r in ROWS:
+        # Derive structural role from Col B (mirrors detect_row_role) so the
+        # frontend can branch on role without needing a separate API call.
+        b_full = r.get("B") or ""
+        b = b_full.strip()
+        role = "unknown"
+        if re.match(r"^\d+(?:\.\d+){2,3}\.\s+", b):
+            role = "section_header"
+        else:
+            m_item = re.match(r"^(\d+)\s*\)\s*", b)
+            m_sub = re.match(r"^(\d+)\s*\.\s*", b)
+            if m_item and (not m_sub or m_item.end() <= m_sub.end()):
+                role = "item"
+            elif m_sub:
+                role = "sub_item"
         rows_payload.append({
             "row": r["row"],
             "A": r["A"],
@@ -1901,6 +1915,7 @@ def api_index():
             "pdf_rel": r["pdf_rel"],
             "pdf_inherited": r.get("pdf_inherited", False),
             "section": r["section_inferred"],
+            "role": role,
             "auto_flags": auto_check_row(r),
         })
     sections = sorted({r["section_inferred"] for r in ROWS if r.get("section_inferred")},
@@ -3157,6 +3172,413 @@ def api_manual_save():
 
 
 # ---------------------------------------------------------------------------
+# Re-annotate Wizard
+#
+# Extends the manual-annotate flow into a stepwise wizard that:
+#   • for brand_model section_header rows, expects 2 rect+label pairs
+#     (ยี่ห้อ, รุ่น) per SKILL.md §"Label DA / DS standard (ยี่ห้อ/รุ่น)"
+#   • for item / sub_item rows, expects 1 pair (existing behaviour)
+#   • lets the user switch the catalog PDF before annotating
+#   • optionally deletes existing annotations whose label starts with the
+#     same prefix(es) before writing the new ones — a clean re-annotate
+# ---------------------------------------------------------------------------
+
+def _expected_steps_for_row(row: dict, role_info: dict) -> list[dict]:
+    """Plan the step labels the user must produce. Pairs the SKILL.md
+    label convention with the row's structural role."""
+    role = role_info.get("role")
+    section = role_info.get("section") or ""
+    parsed = row.get("parsed") or {}
+
+    # Section header that's brand_model → 2 steps (ยี่ห้อ + รุ่น)
+    if role == "section_header":
+        # parsed.type is the cheapest signal; fallback to filename inspection
+        is_bm = (parsed.get("type") == "brand_model")
+        if not is_bm:
+            pdf_rel = row.get("pdf_rel") or ""
+            if pdf_rel:
+                stem = Path(pdf_rel).stem
+                b, m = parse_brand_model_from_filename(stem)
+                is_bm = bool(b and m)
+        if is_bm:
+            return [
+                {"label": "ยี่ห้อ",
+                 "hint": "ลาก rect รอบ <strong>โลโก้ยี่ห้อ</strong> ใน catalog",
+                 "kind": "brand"},
+                {"label": "รุ่น",
+                 "hint": "ลาก rect รอบ <strong>ชื่อรุ่น</strong> (model number) ใน catalog",
+                 "kind": "model"},
+            ]
+        return [
+            {"label": section,
+             "hint": "ลาก rect รอบเนื้อหาที่เกี่ยวกับ section นี้",
+             "kind": "section"},
+        ]
+
+    # Item / sub_item — same single-step flow as manual-annotate
+    label = _label_for_row(role_info)
+    if role == "sub_item":
+        hint = (f"ลาก rect รอบเนื้อหาของ <strong>ข้อย่อย "
+                f"{role_info.get('sub_num', '?')}</strong>")
+    elif role == "item":
+        hint = (f"ลาก rect รอบเนื้อหาของ <strong>ข้อ "
+                f"{role_info.get('item_num', '?')})</strong>")
+    else:
+        hint = "ลาก rect รอบเนื้อหาที่เกี่ยวกับ row นี้"
+    return [{"label": label, "hint": hint, "kind": role or "row"}]
+
+
+def _delete_label_prefixes_for_row(row: dict, role_info: dict) -> list[str]:
+    """Prefixes whose existing FreeText annotations should be wiped before
+    we re-annotate. Conservative — only deletes labels that are *clearly*
+    this row's prior work."""
+    role = role_info.get("role")
+    section = role_info.get("section") or ""
+    parsed = row.get("parsed") or {}
+
+    if role == "section_header":
+        if parsed.get("type") == "brand_model":
+            return ["ยี่ห้อ", "รุ่น"]
+        if section:
+            return [section]   # exact section header label
+        return []
+
+    if role == "item":
+        n = role_info.get("item_num")
+        if section and n is not None:
+            # Match "5.1.1 ข้อ 1)" but NOT "5.1.1 ข้อ 1) ข้อย่อย 1." — sub-items
+            # share the parent prefix, so we anchor on a closing ')' boundary.
+            return [f"{section} ข้อ {n})"]
+        return []
+
+    if role == "sub_item":
+        sub = role_info.get("sub_num")
+        parent = role_info.get("parent_item")
+        if section and sub is not None:
+            if parent is not None:
+                return [f"{section} ข้อ {parent}) ข้อย่อย {sub}."]
+            return [f"{section} ข้อย่อย {sub}."]
+        return []
+
+    return []
+
+
+def _annots_to_delete_by_prefix(pdf_path: Path, page_num: int,
+                                 prefixes: list[str]) -> list[int]:
+    """Return xrefs of FreeText annotations whose contents begin with any
+    of the given prefixes, plus the xref of any nearby Square that looks
+    paired with them (within 12pt edge-to-edge on any side).
+
+    Conservative: a Square is only paired if it shares a side with the
+    label rect — that's how SKILL.md and our generator place them.
+    """
+    if not prefixes or not pdf_path.exists():
+        return []
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception:
+        return []
+    if page_num < 1 or page_num > len(doc):
+        doc.close()
+        return []
+
+    page = doc[page_num - 1]
+    annots = safe_iter_annots(page)
+    label_to_xref: list[tuple[float, float, float, float, int]] = []  # x0,y0,x1,y1,xref
+    square_xrefs: list[tuple[float, float, float, float, int]] = []
+    for ann in annots:
+        try:
+            kind = ann.type[1] if isinstance(ann.type, tuple) else str(ann.type)
+        except Exception:
+            kind = ""
+        try:
+            r = ann.rect
+            xref = ann.xref
+            contents = (ann.info.get("content") or "").strip()
+        except Exception:
+            continue
+        if kind == "FreeText":
+            for pre in prefixes:
+                if contents.startswith(pre):
+                    label_to_xref.append((r.x0, r.y0, r.x1, r.y1, int(xref)))
+                    break
+        elif kind == "Square":
+            square_xrefs.append((r.x0, r.y0, r.x1, r.y1, int(xref)))
+
+    out: set[int] = set()
+    for (lx0, ly0, lx1, ly1, lxref) in label_to_xref:
+        out.add(lxref)
+        # Find the closest Square that shares a side within 12pt
+        best_xref = None
+        best_dist = 1e9
+        for (sx0, sy0, sx1, sy1, sxref) in square_xrefs:
+            # Right side of Square ↔ Left side of label
+            dx = abs(sx1 - lx0)
+            dy = abs((sy0 + sy1) / 2 - (ly0 + ly1) / 2)
+            d = dx + dy
+            if dx <= 12 and dy <= 30 and d < best_dist:
+                best_dist = d; best_xref = sxref
+            # Below Square ↔ above label
+            dy2 = abs(sy1 - ly0)
+            dx2 = abs((sx0 + sx1) / 2 - (lx0 + lx1) / 2)
+            d2 = dy2 + dx2
+            if dy2 <= 12 and dx2 <= 80 and d2 < best_dist:
+                best_dist = d2; best_xref = sxref
+            # Left side of Square ↔ Right side of label (label on left)
+            dx3 = abs(sx0 - lx1)
+            d3 = dx3 + dy
+            if dx3 <= 12 and dy <= 30 and d3 < best_dist:
+                best_dist = d3; best_xref = sxref
+            # Above Square ↔ below label (label above)
+            dy4 = abs(sy0 - ly1)
+            d4 = dy4 + dx2
+            if dy4 <= 12 and dx2 <= 80 and d4 < best_dist:
+                best_dist = d4; best_xref = sxref
+        if best_xref is not None:
+            out.add(best_xref)
+
+    doc.close()
+    return sorted(out)
+
+
+@app.route("/api/reannotate/context")
+def api_reannotate_context():
+    """Returns the wizard plan for a row.
+
+    Response: {ok, row, section, role, col_b, col_d_current, parsed_type,
+               pdf_rel, pdf_meta, candidates, steps, delete_label_prefixes,
+               brand_hint, model_hint}
+    """
+    try:
+        row_num = int(request.args.get("row", 0))
+    except Exception:
+        return jsonify({"ok": False, "error": "bad row"}), 400
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    role_info = detect_row_role(row_num)
+    section = row.get("section_inferred")
+    pdf_rel = row.get("pdf_rel")
+
+    # Always surface candidates so the user can swap PDFs even when one is
+    # already assigned (key request from the user).
+    candidates: list[dict] = []
+    cand_paths = _candidate_pdfs_for_section(section)
+    for p in cand_paths:
+        try:
+            rel = str(p.relative_to(OUTPUT))
+        except Exception:
+            continue
+        candidates.append({
+            "rel": rel,
+            "name": p.name,
+            "folder": p.parent.name,
+            "is_current": (rel == pdf_rel),
+        })
+
+    # If the row had no PDF, default to the first candidate
+    if not pdf_rel and candidates:
+        pdf_rel = candidates[0]["rel"]
+
+    def _meta(rel: str) -> dict | None:
+        try:
+            doc = fitz.open(OUTPUT / rel)
+            return {
+                "rel": rel,
+                "pages": len(doc),
+                "page_sizes": [(round(doc[i].rect.width, 1),
+                                round(doc[i].rect.height, 1))
+                               for i in range(len(doc))],
+            }
+        except Exception:
+            return None
+
+    # Filename-derived brand/model hints (defaults the wizard pre-fills)
+    brand_hint, model_hint = ("", "")
+    if pdf_rel:
+        stem = Path(pdf_rel).stem
+        brand_hint, model_hint = parse_brand_model_from_filename(stem)
+
+    return jsonify({
+        "ok": True,
+        "row": row_num,
+        "section": section,
+        "role": role_info,
+        "col_b": row.get("B") or "",
+        "col_d_current": row.get("D") or "",
+        "parsed_type": (row.get("parsed") or {}).get("type"),
+        "pdf_rel": pdf_rel,
+        "pdf_meta": _meta(pdf_rel) if pdf_rel else None,
+        "candidates": candidates,
+        "steps": _expected_steps_for_row(row, role_info),
+        "delete_label_prefixes": _delete_label_prefixes_for_row(row, role_info),
+        "brand_hint": brand_hint,
+        "model_hint": model_hint,
+    })
+
+
+@app.route("/api/reannotate/save", methods=["POST"])
+def api_reannotate_save():
+    """Body:
+      {row, pdf_rel, page, steps:[{content_rect, label_rect, label_text}, ...],
+       delete_existing: bool, delete_prefixes: [str, ...],
+       col_d_override: str|null}
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        row_num = int(data["row"])
+        pdf_rel = str(data["pdf_rel"])
+        page = int(data["page"])
+        steps = list(data.get("steps") or [])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"bad payload: {e}"}), 400
+
+    if not steps:
+        return jsonify({"ok": False, "error": "no steps to save"}), 400
+
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    pdf_path = (OUTPUT / pdf_rel).resolve()
+    if (not str(pdf_path).startswith(str(OUTPUT.resolve())) or
+            not pdf_path.exists()):
+        return jsonify({"ok": False, "error": "PDF not found"}), 404
+
+    role_info = detect_row_role(row_num)
+
+    # Pre-snapshot — `pre-reannotate-row-N` shows up in the snapshots list
+    _run_version_cmd(["snap", f"pre-reannotate-row-{row_num}"], timeout=60)
+
+    # 1. Compute deletions (only if requested AND prefixes provided)
+    edits: list[dict] = []
+    deleted_xrefs: list[int] = []
+    if data.get("delete_existing"):
+        prefixes = list(data.get("delete_prefixes") or [])
+        if prefixes:
+            deleted_xrefs = _annots_to_delete_by_prefix(pdf_path, page, prefixes)
+            for xref in deleted_xrefs:
+                edits.append({"action": "delete", "xref": xref})
+
+    # 2. Append create edits (Square + FreeText pairs)
+    for st in steps:
+        try:
+            crect = list(map(float, st["content_rect"]))
+            lrect = list(map(float, st["label_rect"]))
+            ltext = (st.get("label_text") or "").strip()
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"bad step: {e}"}), 400
+        edits.append({"action": "create", "page": page, "type": "Square",
+                      "rect": crect, "contents": ""})
+        edits.append({"action": "create", "page": page, "type": "FreeText",
+                      "rect": lrect, "contents": ltext})
+
+    # 3. Apply
+    pdf_result = apply_pdf_edits(pdf_path, edits)
+
+    # 4. Compute new Col D
+    col_d_override = (data.get("col_d_override") or "").strip()
+    if col_d_override:
+        new_d = col_d_override
+    else:
+        # If we're reannotating a brand_model section header AND the user
+        # passed brand/model strings via override, use those; otherwise fall
+        # through to the file-name-based generator.
+        brand = (data.get("brand") or "").strip()
+        model = (data.get("model") or "").strip()
+        if brand and model:
+            new_d = f"ยี่ห้อ {brand} รุ่น {model}"
+        elif brand:
+            new_d = f"ยี่ห้อ {brand}"
+        else:
+            new_d = make_col_d_for_row(row, role_info, pdf_path, page)
+            if not new_d:
+                new_d = (f"เทียบเท่าข้อกำหนด เอกสาร {pdf_path.stem} หน้า {page} "
+                         f"ข้อ {role_info.get('section', '')}")
+
+    old_d = row.get("D") or ""
+    old_pdf_rel = row.get("pdf_rel") or ""
+
+    # 5. Persist Col D + (when PDF changed) update xlsx
+    try:
+        wb = openpyxl.load_workbook(XLSX_PATH)
+        ws = wb.active
+        ws.cell(row_num, 4).value = new_d
+        cur_c = (ws.cell(row_num, 3).value or "").strip()
+        cur_b = (ws.cell(row_num, 2).value or "").strip()
+        if not cur_c or cur_c == cur_b:
+            ws.cell(row_num, 3).value = make_col_c_from_b(cur_b)
+        tmp = XLSX_PATH.with_suffix(".xlsx.tmp")
+        wb.save(str(tmp))
+        with open(tmp, "rb") as f:
+            data_bytes = f.read()
+        fd = os.open(str(XLSX_PATH), os.O_WRONLY | os.O_TRUNC)
+        try:
+            os.write(fd, data_bytes)
+        finally:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"xlsx write failed: {e}",
+                        "pdf_result": pdf_result}), 500
+
+    # 6. Refresh + audit + learning feedback
+    try:
+        load_rows()
+        TOR_CACHE.clear()
+        sync_db_from_memory()
+    except Exception as e:
+        sys.stderr.write(f"[reannotate] refresh: {e}\n")
+
+    try:
+        db.log_audit(action="reannotate",
+                     target_type="row", target_id=str(row_num),
+                     before=old_d, after=new_d,
+                     details={"page": page, "pdf_rel": pdf_rel,
+                              "old_pdf_rel": old_pdf_rel,
+                              "n_steps": len(steps),
+                              "deleted_xrefs": deleted_xrefs,
+                              "annots_applied": pdf_result.get("applied", 0),
+                              "annots_errors": pdf_result.get("errors", 0)},
+                     actor="user")
+    except Exception: pass
+
+    try:
+        learning.record_feedback(
+            row_num=row_num,
+            section=row.get("section_inferred"),
+            input_b=row.get("B", "") or "",
+            input_pdf_rel=pdf_rel,
+            input_role=role_info.get("role", ""),
+            input_filename=pdf_path.name,
+            suggested_c=row.get("C", "") or "",
+            suggested_d=old_d,
+            suggested_annots=[],
+            confidence=0.0,
+            generator="reannotate_wizard",
+            provenance={"old_pdf_rel": old_pdf_rel,
+                        "n_steps": len(steps),
+                        "n_deleted": len(deleted_xrefs)},
+            user_action="edited",
+            final_c=row.get("C", "") or "",
+            final_d=new_d,
+            final_annots=edits,
+        )
+    except Exception as e:
+        sys.stderr.write(f"[reannotate] feedback: {e}\n")
+
+    return jsonify({
+        "ok": True, "row": row_num, "page": page,
+        "old_d": old_d, "new_d": new_d,
+        "pdf_rel": pdf_rel,
+        "pdf_changed": pdf_rel != old_pdf_rel,
+        "deleted_xrefs": deleted_xrefs,
+        "pdf_result": pdf_result,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Project-level versioning — wraps scripts/version.py
 #
 # version.py is the canonical snapshot tool (snap, snap-full, list, restore,
@@ -3665,6 +4087,105 @@ def api_learn_retrain():
     return jsonify({"ok": True, **result})
 
 
+@app.route("/api/learn/pin_pattern", methods=["POST"])
+def api_learn_pin_pattern():
+    """Force-learn a pattern from a single row (Sprint S2.1).
+
+    User clicks 'Pin as template' on a row they've just verified. We
+    register the row's (filename, section, role, final Col D) tuple as
+    learned_patterns with confidence=1.0 and samples_total=1, regardless
+    of the usual PROMOTION_THRESHOLD=2. Future rows matching the trigger
+    will use this template directly.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        row_num = int(data.get("row", 0))
+    except Exception:
+        return jsonify({"ok": False, "error": "bad row"}), 400
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    final_d = (row.get("D") or "").strip()
+    if not final_d:
+        return jsonify({"ok": False, "error": "row has no Col D to pin"}), 400
+
+    section = row.get("section_inferred")
+    pdf_rel = row.get("pdf_rel")
+    role_info = detect_row_role(row_num)
+    role = role_info.get("role", "unknown")
+
+    pinned = []
+    with db.conn() as c:
+        # 1. filename_brand pattern (if Col D is brand_model)
+        if final_d.startswith("ยี่ห้อ ") and pdf_rel:
+            stem = Path(pdf_rel).stem
+            tokens = re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", stem)
+            m = re.match(r"ยี่ห้อ\s+(\S+)\s+รุ่น\s+", final_d)
+            if m and tokens:
+                trigger = next((t for t in tokens if len(t) >= 3), tokens[0]).lower()
+                brand = m.group(1)
+                _upsert_pattern(c, "filename_brand", trigger, None, brand,
+                                samples=1, correct=1, confidence=1.0,
+                                note=f"pinned from R{row_num}")
+                pinned.append(("filename_brand", trigger, brand))
+
+        # 2. row_format_d pattern (always — captures shape preference)
+        sec_root = ".".join(section.split(".")[:2]) if section else "unknown"
+        shape = learning._shape_of_col_d(final_d)
+        _upsert_pattern(c, "row_format_d", role, json.dumps([sec_root]),
+                        shape, samples=1, correct=1, confidence=1.0,
+                        note=f"pinned from R{row_num}")
+        pinned.append(("row_format_d", f"{role}/{sec_root}", shape))
+
+    try:
+        db.log_audit(action="pin_pattern", target_type="row",
+                     target_id=str(row_num),
+                     details={"pinned": pinned, "final_d": final_d},
+                     actor="user")
+    except Exception: pass
+
+    return jsonify({"ok": True, "row": row_num, "pinned": pinned,
+                    "n_patterns": len(pinned)})
+
+
+def _upsert_pattern(c, ptype, trigger, trigger_extra, value,
+                     samples=1, correct=1, confidence=1.0, note=None):
+    """Helper for pin_pattern — insert or update a learned_patterns row."""
+    existing = c.execute(
+        """SELECT pattern_id, samples_total, samples_correct
+           FROM learned_patterns
+           WHERE pattern_type=? AND trigger_key=?
+             AND ifnull(trigger_extra,'')=ifnull(?, '')""",
+        (ptype, trigger, trigger_extra),
+    ).fetchone()
+    if existing:
+        c.execute(
+            """UPDATE learned_patterns
+               SET output_value=?, samples_total=samples_total+?,
+                   samples_correct=samples_correct+?,
+                   confidence=?, enabled=1,
+                   note=COALESCE(?, note),
+                   last_used_at=CURRENT_TIMESTAMP
+               WHERE pattern_id=?""",
+            (value, samples, correct, confidence, note, existing["pattern_id"]),
+        )
+    else:
+        c.execute(
+            """INSERT INTO learned_patterns
+               (pattern_type, trigger_key, trigger_extra, output_value,
+                samples_total, samples_correct, confidence, enabled, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (ptype, trigger, trigger_extra, value, samples, correct, confidence, note),
+        )
+
+
+@app.route("/api/learn/llm_status")
+def api_learn_llm_status():
+    """LLM provider info (Sprint S3 — surfaced in Settings)."""
+    return jsonify(learning.llm_status())
+
+
 @app.route("/api/learn/feedback", methods=["POST"])
 def api_learn_feedback():
     """Direct feedback recorder (e.g., when user edits Col D outside the
@@ -3828,14 +4349,15 @@ INDEX_HTML = r"""<!doctype html>
             "Sukhumvit Set", "Noto Sans Thai", "Thonburi", system-ui, sans-serif;
   --f-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
 
-  --t-xs:   10px;
-  --t-sm:   11px;
-  --t-base: 12px;
-  --t-md:   13px;
-  --t-lg:   14px;
-  --t-xl:   16px;
-  --t-2xl:  20px;
-  --t-3xl:  24px;
+  /* Type scale (bumped for production density 2026-05) */
+  --t-xs:   11px;
+  --t-sm:   12px;
+  --t-base: 13px;
+  --t-md:   14px;   /* body default */
+  --t-lg:   15px;
+  --t-xl:   17px;
+  --t-2xl:  21px;
+  --t-3xl:  26px;
 
   --lh-tight:  1.25;
   --lh-normal: 1.45;
@@ -3851,11 +4373,14 @@ INDEX_HTML = r"""<!doctype html>
   --d-slow:    260ms;
 
   /* Layout */
-  --topbar-h:    44px;
-  --pane-head-h: 36px;
-  --tree-w:      300px;
-  --tree-w-md:   260px;
-  --action-bar-w: 720px;
+  --topbar-h:    52px;
+  --pane-head-h: 40px;
+  --tree-w:      320px;
+  --tree-w-md:   280px;
+  --action-bar-w: 760px;
+  --tree-row-h:  32px;
+  --btn-h:       32px;
+  --btn-h-sm:    28px;
 
   color-scheme: light;
 }
@@ -4017,6 +4542,43 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+/* SVG icon system — single source of glyphs (replaces inline emojis) */
+.ico {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  display: inline-block; vertical-align: -3px;
+  flex-shrink: 0;
+}
+.ico-sm { width: 14px; height: 14px; vertical-align: -2px; }
+.ico-xs { width: 12px; height: 12px; vertical-align: -2px; stroke-width: 2.4; }
+.ico-lg { width: 20px; height: 20px; vertical-align: -4px; }
+.ico-xl { width: 24px; height: 24px; }
+
+/* Skeleton loader (used during async fetches) */
+.skel {
+  background: linear-gradient(90deg,
+    var(--c-surface-2) 0%,
+    var(--c-surface-3) 50%,
+    var(--c-surface-2) 100%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.6s ease-in-out infinite;
+  border-radius: var(--r-md);
+}
+@keyframes skel-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.skel-line { height: 12px; margin: var(--s-3) 0; }
+.skel-line.tall { height: 16px; }
+.skel-block { height: 80px; }
+.skel-img { aspect-ratio: 595 / 842; max-width: 70%; margin: 0 auto; box-shadow: var(--e-2); }
+.skel-stack { display: flex; flex-direction: column; gap: var(--s-3); padding: var(--s-7); }
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; background: var(--c-surface-2); }
+}
+
 /* ── App shell ──────────────────────────────────────────────────── */
 #app {
   display: grid;
@@ -4052,16 +4614,39 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .topbar-brand .sub { font-weight: 400; color: var(--c-text-soft); font-size: var(--t-base); }
 .topbar-spacer { flex: 1; }
-.topbar-actions { display: flex; gap: var(--s-3); align-items: center; }
+.topbar-actions { display: flex; gap: var(--s-2); align-items: center; }
 .topbar-actions .stats-pill {
   display: inline-flex; align-items: center; gap: var(--s-3);
-  padding: 4px var(--s-5);
+  padding: 5px var(--s-5);
   background: var(--c-surface-2); border: 1px solid var(--c-border);
   border-radius: var(--r-pill);
   font-size: var(--t-sm); color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
 }
 .topbar-actions .stats-pill strong { color: var(--c-text); font-weight: 700; }
-.topbar-actions .stats-pill .sep { color: var(--c-text-faint); }
+.topbar-actions .stats-pill .sep { color: var(--c-text-faint); margin: 0 2px; }
+
+/* Topbar buttons (icon + label, ghost-default) */
+.topbar-btn {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-5);
+  height: var(--btn-h);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--c-text-muted);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 500;
+  letter-spacing: 0;
+  transition: all var(--d-fast) var(--ease-std);
+  cursor: pointer;
+}
+.topbar-btn:hover {
+  background: var(--c-surface-2); color: var(--c-text);
+  border-color: var(--c-border);
+}
+.topbar-btn:active { transform: translateY(1px); }
+.topbar-btn.icon-only { padding: 0; width: var(--btn-h); justify-content: center; }
+.topbar-btn .ico { width: 16px; height: 16px; }
 
 .pane {
   overflow: hidden;
@@ -4232,9 +4817,26 @@ select { cursor: pointer; }
 .tree-pane .toolbar input,
 .tree-pane .toolbar select {
   font-size: var(--t-base);
-  padding: 5px var(--s-4);
+  padding: 6px var(--s-4);
+  height: var(--btn-h-sm);
 }
 .tree-pane .toolbar input[type="text"]::-webkit-search-cancel-button { cursor: pointer; }
+
+/* Search input with prefix icon */
+.search-wrap {
+  position: relative;
+}
+.search-wrap .search-ico {
+  position: absolute; left: var(--s-4); top: 50%;
+  transform: translateY(-50%);
+  color: var(--c-text-faint);
+  pointer-events: none;
+}
+.search-wrap input {
+  padding-left: 28px !important;
+}
+.search-wrap input:focus + .search-ico,
+.search-wrap input:focus ~ .search-ico { color: var(--c-primary); }
 
 .filter-row { display: flex; gap: var(--s-3); align-items: center; }
 .filter-row select { font-size: var(--t-sm); padding: 4px var(--s-3); flex: 1; min-width: 0; }
@@ -4255,17 +4857,30 @@ select { cursor: pointer; }
 .tree-node { user-select: none; }
 .tree-row {
   display: flex; align-items: center;
-  padding: 3px var(--s-3) 3px 0;
-  cursor: pointer; gap: var(--s-1);
-  line-height: 1.4; min-height: 24px;
+  padding: 0 var(--s-3) 0 0;
+  cursor: pointer; gap: var(--s-2);
+  line-height: 1.4; min-height: var(--tree-row-h);
   position: relative;
   transition: background var(--d-fast) var(--ease-std);
 }
+/* Status indicator strip (left edge, 4px wide) — replaces emoji icon */
+.tree-row::before {
+  content: ''; position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 3px; border-radius: 0 2px 2px 0;
+  background: transparent;
+  transition: background var(--d-fast) var(--ease-std);
+}
+.tree-row[data-status="pass"]::before     { background: var(--c-success); }
+.tree-row[data-status="fail"]::before     { background: var(--c-danger); }
+.tree-row[data-status="need_fix"]::before { background: var(--c-warn); }
+.tree-row[data-status="skip"]::before     { background: var(--c-text-faint); }
 .tree-row:hover { background: var(--c-surface-2); }
 .tree-row.selected {
   background: var(--c-primary-soft);
-  box-shadow: inset 2px 0 0 var(--c-primary);
+  box-shadow: inset 3px 0 0 var(--c-primary);
 }
+.tree-row.selected::before { background: var(--c-primary) !important; }
 .tree-row.selected .tree-label { color: var(--c-primary-text); font-weight: 600; }
 .tree-chev {
   width: 16px; flex-shrink: 0; text-align: center; color: var(--c-text-faint);
@@ -4283,7 +4898,7 @@ select { cursor: pointer; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--t-base); color: var(--c-text);
 }
-.tree-status { width: 14px; flex-shrink: 0; font-size: var(--t-sm); text-align: center; }
+.tree-status { display: none; }   /* Replaced by left-edge strip via [data-status] */
 .tree-flags  { font-size: var(--t-xs); color: var(--c-warn-text); }
 .tree-children { display: none; }
 .tree-node.expanded > .tree-children { display: block; }
@@ -4599,7 +5214,7 @@ select { cursor: pointer; }
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
 }
 
-/* Manual-annotate banner */
+/* Manual-annotate / Re-annotate wizard banner */
 .manual-mode-banner {
   display: none;
   padding: var(--s-3) var(--s-7);
@@ -4607,8 +5222,126 @@ select { cursor: pointer; }
   border-bottom: 2px solid var(--c-success);
   font-size: var(--t-base);
   align-items: center; gap: var(--s-4);
+  flex-wrap: wrap;
 }
 .manual-mode-banner.show { display: flex; animation: slide-down var(--d-base) var(--ease-out); }
+
+/* Wizard stepper progress (chips) */
+.wiz-progress {
+  display: inline-flex; gap: 4px; align-items: center;
+  flex-shrink: 0;
+}
+.wiz-progress .step {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px var(--s-4);
+  background: rgba(255,255,255,0.6);
+  border: 1px solid var(--c-success);
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 600;
+  color: var(--c-success-text);
+  transition: all var(--d-fast) var(--ease-std);
+  white-space: nowrap;
+}
+.wiz-progress .step.active {
+  background: var(--c-success); color: white;
+  box-shadow: var(--e-2);
+}
+.wiz-progress .step.done {
+  background: var(--c-success-soft);
+  color: var(--c-success-text);
+  opacity: 0.85;
+}
+.wiz-progress .step .num {
+  display: inline-block; min-width: 14px; text-align: center;
+  font-family: var(--f-mono);
+}
+.wiz-progress .step .check { font-size: 9px; }
+.wiz-progress .arrow {
+  color: var(--c-success-text); opacity: 0.5;
+  font-size: var(--t-xs);
+}
+
+/* Wizard action bar within banner */
+.wiz-actions {
+  display: inline-flex; gap: var(--s-3); align-items: center;
+  margin-left: auto; flex-wrap: wrap;
+}
+
+/* Wizard PDF picker button */
+.wiz-pdf-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px var(--s-4);
+  background: rgba(255,255,255,0.85);
+  border: 1px solid var(--c-success);
+  color: var(--c-success-text);
+  border-radius: var(--r-md);
+  font-size: var(--t-xs); font-weight: 600;
+  font-family: var(--f-mono);
+  max-width: 280px;
+  transition: all var(--d-fast) var(--ease-std);
+  position: relative;
+}
+.wiz-pdf-btn:hover { background: white; border-color: var(--c-success-hover); }
+.wiz-pdf-btn .wiz-pdf-icon { flex-shrink: 0; font-size: var(--t-sm); }
+.wiz-pdf-btn .wiz-pdf-label {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--t-xs);
+}
+.wiz-pdf-btn .wiz-pdf-caret { flex-shrink: 0; font-size: 9px; opacity: 0.7; }
+
+.manual-mode-banner .back,
+.manual-mode-banner .cancel,
+.manual-mode-banner .save { white-space: nowrap; }
+.manual-mode-banner .back:disabled {
+  opacity: 0.4; cursor: not-allowed;
+  background: rgba(255,255,255,0.4);
+}
+
+/* Floating PDF picker dropdown */
+.wiz-pdf-menu {
+  position: fixed; z-index: 250;
+  background: var(--c-surface);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-4);
+  border: 1px solid var(--c-border);
+  padding: 4px;
+  min-width: 320px; max-width: 480px;
+  max-height: 60vh; overflow: auto;
+  font-size: var(--t-base);
+  animation: menu-pop var(--d-fast) var(--ease-out);
+}
+.wiz-pdf-menu .menu-header {
+  padding: 6px var(--s-5) 4px;
+  font-size: var(--t-xs); color: var(--c-text-faint);
+  text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700;
+  border-bottom: 1px solid var(--c-divider);
+  margin-bottom: 2px;
+}
+.wiz-pdf-menu button.pdf-opt {
+  display: flex; flex-direction: column;
+  width: 100%; padding: 6px var(--s-5);
+  border: 0; background: transparent;
+  border-radius: var(--r-sm);
+  text-align: left;
+  font-size: var(--t-sm);
+  color: var(--c-text);
+  transition: background var(--d-fast) var(--ease-std);
+  gap: 1px;
+}
+.wiz-pdf-menu button.pdf-opt:hover { background: var(--c-surface-2); }
+.wiz-pdf-menu button.pdf-opt.is-current {
+  background: var(--c-success-soft); color: var(--c-success-text);
+  font-weight: 600;
+}
+.wiz-pdf-menu button.pdf-opt .pdf-name {
+  font-family: var(--f-mono); font-size: var(--t-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wiz-pdf-menu button.pdf-opt .pdf-folder {
+  font-size: var(--t-xs); color: var(--c-text-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wiz-pdf-menu button.pdf-opt.is-current .pdf-folder { color: var(--c-success); }
 @keyframes slide-down {
   from { opacity: 0; transform: translateY(-6px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -4681,62 +5414,125 @@ select { cursor: pointer; }
   border-radius: var(--r-sm);
 }
 .ab-spacer { flex: 1; }
-.ab-buttons { display: flex; gap: 4px; align-items: center; }
-.ab-btn {
-  display: inline-flex; align-items: center; gap: var(--s-3);
-  padding: 7px var(--s-6);
-  border: 1px solid var(--c-border-strong);
-  background: var(--c-surface);
-  color: var(--c-text);
+
+/* === Verdict segmented control ============================== */
+.verdict-control {
+  display: inline-flex;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  padding: 3px;
+  gap: 2px;
+}
+.verdict-control .ab-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 0 var(--s-5);
+  height: 28px;
   border-radius: var(--r-md);
-  font-size: var(--t-base); font-weight: 500;
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  white-space: nowrap;
   transition: background var(--d-fast) var(--ease-std),
               color var(--d-fast) var(--ease-std),
-              border-color var(--d-fast) var(--ease-std),
+              box-shadow var(--d-fast) var(--ease-std),
               transform var(--d-fast) var(--ease-out);
-  white-space: nowrap;
+  cursor: pointer;
 }
-.ab-btn:hover { background: var(--c-surface-2); }
-.ab-btn:active { transform: translateY(1px); }
-.ab-btn.pass { border-color: var(--c-success); color: var(--c-success-text); }
-.ab-btn.pass:hover { background: var(--c-success-soft); }
-.ab-btn.pass.active {
-  background: var(--c-success); color: white; border-color: var(--c-success);
-  box-shadow: var(--e-2);
+.verdict-control .ab-btn .vc-label { font-weight: 500; }
+.verdict-control .ab-btn:hover { background: var(--c-surface); color: var(--c-text); }
+.verdict-control .ab-btn:active { transform: translateY(1px); }
+.verdict-control .ab-btn .kbd {
+  background: var(--c-surface-3); color: var(--c-text-faint);
+  border: 1px solid var(--c-border);
+  padding: 0 4px; border-radius: var(--r-sm);
+  font-family: var(--f-mono); font-size: var(--t-xs);
+  margin-left: var(--s-2);
 }
-.ab-btn.fail { border-color: var(--c-danger); color: var(--c-danger-text); }
-.ab-btn.fail:hover { background: var(--c-danger-soft); }
-.ab-btn.fail.active {
-  background: var(--c-danger); color: white; border-color: var(--c-danger);
-  box-shadow: var(--e-2);
+
+/* Active state per kind — fills the slot with semantic color */
+.verdict-control .ab-btn.pass.active {
+  background: var(--c-success); color: white;
+  box-shadow: 0 1px 2px rgba(16,185,129,0.3);
 }
-.ab-btn.fix  { border-color: var(--c-warn); color: var(--c-warn-text); }
-.ab-btn.fix:hover { background: var(--c-warn-soft); }
-.ab-btn.fix.active  {
-  background: var(--c-warn); color: white; border-color: var(--c-warn);
-  box-shadow: var(--e-2);
+.verdict-control .ab-btn.fail.active {
+  background: var(--c-danger); color: white;
+  box-shadow: 0 1px 2px rgba(239,68,68,0.3);
 }
-.ab-btn.skip { border-color: var(--c-border-strong); color: var(--c-text-muted); }
-.ab-btn.skip:hover { background: var(--c-surface-3); }
-.ab-btn.skip.active {
-  background: var(--c-text-soft); color: white; border-color: var(--c-text-soft);
-  box-shadow: var(--e-1);
+.verdict-control .ab-btn.fix.active {
+  background: var(--c-warn); color: white;
+  box-shadow: 0 1px 2px rgba(245,158,11,0.3);
 }
-.ab-btn.auto { border-color: var(--c-purple); color: var(--c-purple-text); }
-.ab-btn.auto:hover { background: var(--c-purple-soft); }
-.ab-btn.mark { border-color: var(--c-teal); color: var(--c-teal-text); }
-.ab-btn.mark:hover { background: var(--c-teal-soft); }
-.ab-btn.mark.commitment {
+.verdict-control .ab-btn.skip.active {
+  background: var(--c-text-soft); color: white;
+  box-shadow: 0 1px 2px rgba(100,116,139,0.3);
+}
+.verdict-control .ab-btn.active .kbd {
+  background: rgba(255,255,255,0.18); color: rgba(255,255,255,0.85);
+  border-color: rgba(255,255,255,0.25);
+}
+.verdict-control .ab-btn.active .ico { stroke-width: 2.5; }
+
+/* === Secondary actions (Auto, Mark) — visually subordinate === */
+.ab-secondary { display: inline-flex; gap: 4px; align-items: center; }
+.ab-secondary .ab-btn {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  padding: 0 var(--s-5);
+  height: var(--btn-h-sm);
+  border: 1px solid var(--c-border-strong);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 500;
+  transition: background var(--d-fast) var(--ease-std),
+              color var(--d-fast) var(--ease-std),
+              border-color var(--d-fast) var(--ease-std);
+  cursor: pointer;
+}
+.ab-secondary .ab-btn:hover { background: var(--c-surface-2); color: var(--c-text); }
+.ab-secondary .ab-btn:active { transform: translateY(1px); }
+.ab-secondary .ab-btn.auto { color: var(--c-purple-text); }
+.ab-secondary .ab-btn.auto:hover { background: var(--c-purple-soft); border-color: var(--c-purple); }
+.ab-secondary .ab-btn.mark { color: var(--c-teal-text); }
+.ab-secondary .ab-btn.mark:hover { background: var(--c-teal-soft); border-color: var(--c-teal); }
+.ab-secondary .ab-btn.mark.commitment {
   background: var(--c-warn-soft); border-color: var(--c-warn); color: var(--c-warn-text);
   animation: pulse-warn 2s ease-in-out infinite;
 }
-.ab-btn .kbd {
-  background: rgba(0,0,0,0.06);
-  padding: 0 4px; border-radius: var(--r-sm);
-  font-family: var(--f-mono); font-size: var(--t-xs);
-  border: none; color: inherit;
+
+/* iOS-style toggle (replaces tiny checkbox) */
+.ab-toggle {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  cursor: pointer; user-select: none;
+  font-size: var(--t-sm); color: var(--c-text-muted);
+  margin-left: var(--s-3);
 }
-.ab-btn.active .kbd { background: rgba(255,255,255,0.25); color: inherit; border: none; }
+.ab-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.ab-toggle .ab-toggle-track {
+  width: 30px; height: 18px;
+  background: var(--c-border-strong);
+  border-radius: 999px;
+  position: relative;
+  transition: background var(--d-fast) var(--ease-std);
+  flex-shrink: 0;
+}
+.ab-toggle .ab-toggle-track::after {
+  content: '';
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: white;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  transition: transform var(--d-base) var(--ease-out);
+}
+.ab-toggle input:checked + .ab-toggle-track { background: var(--c-primary); }
+.ab-toggle input:checked + .ab-toggle-track::after { transform: translateX(12px); }
+.ab-toggle input:focus-visible + .ab-toggle-track {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+}
 
 .ab-bottom { display: flex; gap: var(--s-4); align-items: center; margin-top: var(--s-4); }
 .ab-bottom textarea {
@@ -4763,13 +5559,16 @@ select { cursor: pointer; }
   border-radius: var(--r-md);
   border: 1px solid var(--c-border);
   box-shadow: var(--e-1);
-  display: inline-flex; gap: var(--s-4); align-items: center;
-  opacity: 0.85;
+  display: inline-flex; gap: var(--s-5); align-items: center;
+  opacity: 0.6;
   transition: opacity var(--d-base) var(--ease-std);
   z-index: 50;
 }
 .kbd-help:hover { opacity: 1; }
-.kbd-help .kbd-group { display: inline-flex; gap: 3px; align-items: center; }
+.kbd-help .kbd-group {
+  display: inline-flex; gap: 3px; align-items: center;
+}
+.kbd-help .kbd-text { color: var(--c-text-faint); margin-left: 2px; }
 
 /* ── Sync banner ────────────────────────────────────────────────── */
 .sync-banner {
@@ -4879,11 +5678,14 @@ select { cursor: pointer; }
   margin: 0 0 var(--s-7);
   font-size: var(--t-xl); font-weight: 700;
   color: var(--c-text);
-  display: flex; justify-content: space-between; align-items: center;
+  display: flex; align-items: center;
   gap: var(--s-4);
   border-bottom: 1px solid var(--c-divider);
   padding-bottom: var(--s-5);
 }
+.modal h3 > .ico { color: var(--c-primary); flex-shrink: 0; }
+.modal h3 > span { flex: 1; }
+.modal h3 > .close { margin-left: auto; }
 .modal h3 .close {
   background: none; border: none; cursor: pointer;
   font-size: var(--t-xl); color: var(--c-text-soft);
@@ -4965,13 +5767,17 @@ select { cursor: pointer; }
   position: relative;
 }
 .toast .close {
-  float: right; cursor: pointer; opacity: 0.5;
-  padding: 0 var(--s-3);
-  font-size: var(--t-md);
-  transition: opacity var(--d-fast) var(--ease-std);
+  float: right;
+  background: transparent; border: none;
+  cursor: pointer; opacity: 0.5;
+  padding: 2px;
+  color: var(--c-text-muted);
+  border-radius: var(--r-sm);
+  transition: opacity var(--d-fast) var(--ease-std), background var(--d-fast) var(--ease-std);
   position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
 }
-.toast .close:hover { opacity: 1; }
+.toast .close:hover { opacity: 1; background: var(--c-surface-2); }
 @keyframes toast-in {
   from { transform: translateX(120%); opacity: 0; }
   to   { transform: translateX(0); opacity: 1; }
@@ -5338,6 +6144,375 @@ select { cursor: pointer; }
   .topbar-actions .stats-pill { display: none; }
 }
 
+/* ============================================================
+ * Sprint UI-2 / UI-3 additions (production polish, motion, a11y)
+ * ============================================================ */
+
+/* Hover lift + press feedback on interactive elements */
+.btn:not(:disabled):not(.is-disabled),
+.topbar-btn,
+.versions-btn,
+.canvas-toolbar button,
+.history-item,
+.version-item,
+.learn-pattern-row,
+.audit-row,
+.col-d-menu button,
+.wiz-pdf-menu button.pdf-opt,
+.tree-row {
+  transition:
+    transform var(--d-fast) var(--ease-out),
+    box-shadow var(--d-fast) var(--ease-std),
+    background var(--d-fast) var(--ease-std),
+    color var(--d-fast) var(--ease-std),
+    border-color var(--d-fast) var(--ease-std);
+}
+.btn:not(:disabled):not(.is-disabled):active,
+.topbar-btn:active,
+.versions-btn:active,
+.canvas-toolbar button:active {
+  transform: translateY(1px);
+}
+/* Cards lift on hover */
+.history-item:hover,
+.version-item:hover,
+.learn-pattern-row:hover {
+  transform: translateY(-1px);
+}
+.audit-stats .stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--e-2);
+}
+
+/* Modal slot system (Sprint UI-2.2) — for new modals; old ones still work */
+.modal__header {
+  display: flex; align-items: center; gap: var(--s-4);
+  padding-bottom: var(--s-5);
+  border-bottom: 1px solid var(--c-divider);
+  margin: calc(-1 * var(--s-7)) calc(-1 * var(--s-8)) var(--s-6);
+  padding: var(--s-6) var(--s-8) var(--s-5);
+}
+.modal__header .ico { color: var(--c-primary); flex-shrink: 0; }
+.modal__title { flex: 1; font-size: var(--t-xl); font-weight: 700; }
+.modal__body { padding: 0; max-height: 65vh; overflow: auto; }
+.modal__footer {
+  position: sticky; bottom: 0;
+  display: flex; gap: var(--s-3);
+  padding: var(--s-5) var(--s-8);
+  margin: var(--s-6) calc(-1 * var(--s-8)) calc(-1 * var(--s-7));
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-divider);
+  border-radius: 0 0 var(--r-xl) var(--r-xl);
+}
+.modal__footer .spacer { flex: 1; }
+
+/* Empty state (Sprint UI-2.3) */
+.empty-state {
+  padding: var(--s-12) var(--s-7);
+  text-align: center;
+  display: flex; flex-direction: column; align-items: center;
+  gap: var(--s-5);
+  color: var(--c-text-soft);
+}
+.empty-state .es-icon {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-faint);
+}
+.empty-state .es-icon .ico { width: 28px; height: 28px; stroke-width: 1.5; }
+.empty-state .es-title {
+  font-size: var(--t-lg); font-weight: 600; color: var(--c-text);
+  margin: 0;
+}
+.empty-state .es-body {
+  font-size: var(--t-base); color: var(--c-text-muted);
+  max-width: 320px;
+}
+.empty-state .es-cta {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  padding: 6px var(--s-5);
+  background: var(--c-primary); color: white;
+  border: 0; border-radius: var(--r-md);
+  font-size: var(--t-base); font-weight: 600;
+  cursor: pointer;
+  transition: background var(--d-fast) var(--ease-std);
+}
+.empty-state .es-cta:hover { background: var(--c-primary-hover); }
+
+/* Error state */
+.error-state .es-icon { background: var(--c-danger-soft); border-color: var(--c-danger); color: var(--c-danger); }
+.error-state .es-title { color: var(--c-danger-text); }
+
+/* Counter animation (Sprint UI-2.4) */
+.count-animate { display: inline-block; }
+.count-animate.pop { animation: count-pop var(--d-base) var(--ease-out); }
+@keyframes count-pop {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.15); color: var(--c-primary); }
+  100% { transform: scale(1); }
+}
+
+/* List item enter / exit */
+.list-enter { animation: list-enter var(--d-base) var(--ease-out); }
+@keyframes list-enter {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* High-contrast theme (Sprint UI-3.2) */
+:root[data-theme="hi-contrast"] {
+  --c-bg: #000000;
+  --c-bg-subtle: #0a0a0a;
+  --c-surface: #0a0a0a;
+  --c-surface-2: #141414;
+  --c-surface-3: #1c1c1c;
+  --c-border: #555;
+  --c-border-strong: #777;
+  --c-divider: #2a2a2a;
+  --c-text: #ffffff;
+  --c-text-muted: #e8e8e8;
+  --c-text-soft: #c8c8c8;
+  --c-text-faint: #a0a0a0;
+  --c-primary: #4d9bff;
+  --c-primary-soft: #002850;
+  --c-primary-text: #b8d6ff;
+  --c-success: #2bff7a;
+  --c-success-soft: #003015;
+  --c-success-text: #80ffb0;
+  --c-danger: #ff5050;
+  --c-danger-soft: #380000;
+  --c-danger-text: #ffaaaa;
+  --c-warn: #ffaa00;
+  --c-warn-soft: #2a1a00;
+  --c-warn-text: #ffd980;
+  color-scheme: dark;
+}
+:root[data-theme="hi-contrast"] :focus-visible {
+  outline: 3px solid #ffff00 !important;
+  outline-offset: 2px !important;
+}
+
+/* Bottom-sheet action bar on mobile (Sprint UI-3.4) */
+@media (max-width: 700px) {
+  .action-bar.bottom-sheet {
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+    bottom: 0; left: 0; right: 0; transform: none;
+    border-bottom: 0; border-left: 0; border-right: 0;
+    box-shadow: 0 -8px 24px rgba(0,0,0,0.18);
+    max-width: 100vw; min-width: 0;
+  }
+  .ab-btn, .verdict-control .ab-btn {
+    min-height: 44px;       /* Apple-HIG tap target */
+    padding: 0 var(--s-5);
+  }
+  .topbar-btn { min-height: 44px; min-width: 44px; }
+  .canvas-toolbar button { min-height: 36px; min-width: 36px; }
+}
+
+/* Command palette (Sprint UI-2.6) */
+.cmdk-bg {
+  position: fixed; inset: 0;
+  background: var(--c-overlay);
+  display: none; align-items: flex-start; justify-content: center;
+  z-index: 400;
+  padding-top: 12vh;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: modal-bg-in var(--d-base) var(--ease-std);
+}
+.cmdk-bg.show { display: flex; }
+.cmdk {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-xl);
+  width: 640px; max-width: calc(100vw - var(--s-8));
+  box-shadow: var(--e-5);
+  overflow: hidden;
+  animation: modal-in var(--d-slow) var(--ease-out);
+}
+.cmdk-input-wrap {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-5) var(--s-6);
+  border-bottom: 1px solid var(--c-divider);
+}
+.cmdk-input-wrap .ico { color: var(--c-text-faint); flex-shrink: 0; }
+.cmdk-input {
+  flex: 1; border: 0; background: transparent;
+  font-size: var(--t-lg);
+  color: var(--c-text);
+  outline: none;
+  padding: 0;
+  height: 28px;
+}
+.cmdk-input::placeholder { color: var(--c-text-faint); }
+.cmdk-hint {
+  font-size: var(--t-xs); color: var(--c-text-faint);
+  display: inline-flex; gap: var(--s-2); align-items: center;
+}
+.cmdk-list {
+  max-height: 50vh; overflow: auto;
+  padding: var(--s-2);
+}
+.cmdk-section {
+  font-size: var(--t-xs); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--c-text-faint);
+  padding: var(--s-4) var(--s-5) var(--s-2);
+}
+.cmdk-item {
+  display: flex; align-items: center; gap: var(--s-4);
+  padding: var(--s-3) var(--s-5);
+  cursor: pointer;
+  border-radius: var(--r-md);
+  font-size: var(--t-base);
+  color: var(--c-text);
+  transition: background var(--d-fast) var(--ease-std);
+}
+.cmdk-item:hover { background: var(--c-surface-2); }
+.cmdk-item.cmdk-active {
+  background: var(--c-primary-soft); color: var(--c-primary-text);
+}
+.cmdk-item .ico { color: var(--c-text-soft); }
+.cmdk-item.cmdk-active .ico { color: var(--c-primary); }
+.cmdk-item-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk-item-meta { font-size: var(--t-xs); color: var(--c-text-faint); font-family: var(--f-mono); }
+.cmdk-item-shortcut { display: inline-flex; gap: 2px; }
+.cmdk-empty {
+  padding: var(--s-9) var(--s-7);
+  text-align: center;
+  color: var(--c-text-faint);
+  font-size: var(--t-base);
+}
+
+/* Toast action button (Undo) */
+.toast-action {
+  display: inline-block; margin-top: var(--s-3);
+  background: transparent; border: 1px solid var(--c-border);
+  color: var(--c-primary);
+  padding: 3px var(--s-4);
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm); font-weight: 600;
+  cursor: pointer;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.toast-action:hover { background: var(--c-primary-soft); border-color: var(--c-primary); }
+
+/* Onboarding overlay (Sprint UI-3.1) */
+.onboard-bg {
+  position: fixed; inset: 0;
+  background: rgba(15,23,42,0.65);
+  z-index: 500;
+  display: none; align-items: center; justify-content: center;
+  backdrop-filter: blur(2px);
+}
+.onboard-bg.show { display: flex; animation: modal-bg-in var(--d-base) var(--ease-std); }
+.onboard-card {
+  background: var(--c-surface);
+  border-radius: var(--r-xl);
+  padding: var(--s-9);
+  max-width: 480px;
+  box-shadow: var(--e-5);
+  border: 1px solid var(--c-border);
+  animation: modal-in var(--d-slow) var(--ease-out);
+}
+.onboard-card h2 {
+  margin: 0 0 var(--s-3); font-size: var(--t-xl); font-weight: 700;
+}
+.onboard-card p {
+  margin: var(--s-3) 0;
+  color: var(--c-text-muted);
+  line-height: var(--lh-loose);
+}
+.onboard-shortcuts {
+  display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3);
+  margin: var(--s-5) 0;
+  font-size: var(--t-sm);
+}
+.onboard-shortcuts li {
+  display: flex; gap: var(--s-3); align-items: center;
+  list-style: none;
+}
+.onboard-shortcuts .kbd { flex-shrink: 0; }
+.onboard-actions {
+  display: flex; justify-content: flex-end; gap: var(--s-3);
+  margin-top: var(--s-6);
+}
+
+/* Topbar Settings dropdown (Sprint UI-2.5) */
+.topbar-menu-btn { position: relative; }
+.topbar-menu {
+  position: absolute; top: calc(100% + 4px); right: 0;
+  min-width: 220px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-3);
+  padding: 4px;
+  z-index: 250;
+  animation: menu-pop var(--d-fast) var(--ease-out);
+  display: none;
+}
+.topbar-menu.show { display: block; }
+.topbar-menu button {
+  display: flex; width: 100%; align-items: center; gap: var(--s-3);
+  padding: var(--s-3) var(--s-5);
+  background: transparent; border: 0;
+  text-align: left;
+  color: var(--c-text);
+  font-size: var(--t-base);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.topbar-menu button:hover { background: var(--c-surface-2); }
+.topbar-menu button .ico { color: var(--c-text-soft); }
+.topbar-menu .menu-sep { height: 1px; background: var(--c-divider); margin: 4px 0; }
+
+/* Diff toast (Sprint S2 — before/after Col D) */
+.toast.diff .body { font-family: var(--f-mono); font-size: var(--t-xs); }
+.toast.diff .diff-old {
+  display: block; color: var(--c-danger-text);
+  text-decoration: line-through;
+  opacity: 0.85; margin-bottom: 2px;
+}
+.toast.diff .diff-new {
+  display: block; color: var(--c-success-text);
+  font-weight: 600;
+}
+
+/* Apply to siblings dialog */
+.siblings-dialog {
+  background: var(--c-success-soft);
+  border: 1px solid var(--c-success);
+  border-radius: var(--r-md);
+  padding: var(--s-5);
+  margin: var(--s-5) 0;
+  font-size: var(--t-sm);
+  color: var(--c-success-text);
+}
+.siblings-dialog strong { color: var(--c-success-text); font-weight: 700; }
+.siblings-dialog ul {
+  margin: var(--s-3) 0;
+  padding-left: var(--s-7);
+}
+.siblings-dialog .sibling-actions {
+  display: flex; gap: var(--s-3); margin-top: var(--s-4);
+}
+
+/* Wizard skill-md tip (Sprint S3.6) */
+.wiz-skill-tip {
+  background: var(--c-info-soft);
+  border-left: 3px solid var(--c-info);
+  padding: var(--s-3) var(--s-5);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: var(--t-xs);
+  color: var(--c-info-text);
+  margin-top: var(--s-3);
+}
+.wiz-skill-tip strong { font-weight: 700; }
+
 /* ── Print (subtle) ─────────────────────────────────────────────── */
 @media print {
   .topbar, .action-bar, .mobile-tabs, .toast-stack, .kbd-help, .canvas-toolbar { display: none !important; }
@@ -5348,6 +6523,54 @@ select { cursor: pointer; }
 </style>
 </head>
 <body>
+
+<!-- ============================================================
+     Inline SVG icon sprite (Lucide-derived, stroke 2 / 24x24).
+     Use via <svg class="ico"><use href="#i-..."/></svg> or ico('name').
+     ============================================================ -->
+<svg width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <defs>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></symbol>
+    <symbol id="i-skip" viewBox="0 0 24 24"><path d="M5 4l10 8-10 8V4zM19 5v14"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2zM19 14l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM5 16l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2zM22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24"><path d="M12 5a3 3 0 0 0-5.99-.16A3 3 0 0 0 4 8a3 3 0 0 0 0 6 3 3 0 0 0 2 3 3 3 0 0 0 6 0V5zM12 5a3 3 0 0 1 5.99-.16A3 3 0 0 1 20 8a3 3 0 0 1 0 6 3 3 0 0 1-2 3 3 3 0 0 1-6 0"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.04a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.04a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 15-6.7L21 13"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="M21 8.5l-9-5.5-9 5.5L12 14zM3 8.5v7l9 5.5 9-5.5v-7M12 14v7"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14L21 3"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+    <symbol id="i-square" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/></symbol>
+    <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M3 3l7.5 18 2.5-7 7-2.5z"/></symbol>
+    <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></symbol>
+  </defs>
+</svg>
 
 <!-- Sync banner (shown when working dir differs from latest snapshot) -->
 <div id="sync-banner" class="sync-banner" role="status" aria-live="polite">
@@ -5361,36 +6584,48 @@ select { cursor: pointer; }
   <!-- ───── TOPBAR ──────────────────────────────────────────────── -->
   <header class="topbar" role="banner">
     <div class="topbar-brand">
-      <span class="logo" aria-hidden="true">SP</span>
-      <span>Comply Verify <span class="sub">Smart Plant 1</span></span>
+      <span class="logo" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z" fill="currentColor" stroke="none"/><path d="M3 12l9 4 9-4M3 17l9 4 9-4" opacity="0.5"/></svg></span>
+      <span>Comply <span class="sub">Smart Plant 1</span></span>
     </div>
     <div class="topbar-spacer"></div>
     <div class="topbar-actions">
+      <button class="topbar-btn" onclick="openCmdK()" title="Command palette (⌘K)" aria-label="open command palette"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><span class="kbd" style="margin-left:4px">⌘K</span></button>
       <span class="stats-pill" id="stats-pill" role="status" aria-label="overall progress">
         <span id="stats-pill-progress">—</span>
       </span>
-      <button class="versions-btn" onclick="toggleTheme()" title="สลับธีม" aria-label="สลับธีม light/dark" id="theme-toggle">🌓</button>
-      <button class="versions-btn" onclick="showLearning()" title="HITL learning loop / patterns">🧠 Learn</button>
-      <button class="versions-btn" onclick="showAudit()" title="Audit log + DB stats">📊 Audit</button>
-      <button class="versions-btn" onclick="showVersions()" title="โปรเจกต์ snapshots / versioning">📚 Versions</button>
+      <button class="topbar-btn icon-only" onclick="toggleTheme()" title="สลับธีม light/dark" aria-label="สลับธีม light/dark" id="theme-toggle"><svg class="ico" aria-hidden="true"><use href="#i-moon"/></svg></button>
+      <button class="topbar-btn" onclick="showLearning()" title="HITL learning"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg><span>Learn</span></button>
+      <div class="topbar-menu-btn">
+        <button class="topbar-btn icon-only" onclick="toggleTopbarMenu(event)" title="More" aria-label="more actions" aria-haspopup="true"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg></button>
+        <div class="topbar-menu" id="topbar-menu" role="menu">
+          <button onclick="closeTopbarMenu();showAudit()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-chart"/></svg><span>Database &amp; Audit</span></button>
+          <button onclick="closeTopbarMenu();showVersions()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Project versions</span></button>
+          <div class="menu-sep"></div>
+          <button onclick="closeTopbarMenu();showSettings()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
+          <button onclick="closeTopbarMenu();showOnboarding(true)" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-help"/></svg><span>Help &amp; shortcuts</span></button>
+        </div>
+      </div>
     </div>
   </header>
 
   <!-- Mobile tab navigation (replaces topbar at <700px) -->
   <nav class="mobile-tabs" role="tablist" aria-label="pane navigation">
-    <button class="active" data-tab="tree"   onclick="setMobileTab('tree')"   role="tab" aria-selected="true">🌲 Tree</button>
-    <button              data-tab="center" onclick="setMobileTab('center')" role="tab" aria-selected="false">📄 TOR/xlsx</button>
-    <button              data-tab="pdf"    onclick="setMobileTab('pdf')"    role="tab" aria-selected="false">📑 Catalog</button>
+    <button class="active" data-tab="tree"   onclick="setMobileTab('tree')"   role="tab" aria-selected="true"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg><span>Tree</span></button>
+    <button              data-tab="center" onclick="setMobileTab('center')" role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg><span>TOR/xlsx</span></button>
+    <button              data-tab="pdf"    onclick="setMobileTab('pdf')"    role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>Catalog</span></button>
   </nav>
 
   <!-- ───── LEFT: Tree ──────────────────────────────────────────── -->
   <section class="pane tree-pane" aria-label="row tree">
     <h2>
-      <span class="pane-title"><span class="icon" aria-hidden="true">🗂</span><span>โครงสร้าง</span> <span id="tree-count" style="font-weight:400;color:var(--c-text-faint)"></span></span>
+      <span class="pane-title"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg><span>โครงสร้าง</span> <span id="tree-count" style="font-weight:400;color:var(--c-text-faint)"></span></span>
     </h2>
     <div class="stats-bar" id="stats" aria-live="polite"></div>
     <div class="toolbar" role="search">
-      <input type="search" id="tree-search" placeholder="🔍 ค้น section / row / spec…" aria-label="ค้นหา row">
+      <div class="search-wrap">
+        <svg class="search-ico ico ico-sm" aria-hidden="true"><use href="#i-search"/></svg>
+        <input type="search" id="tree-search" placeholder="ค้น section / row / spec…" aria-label="ค้นหา row">
+      </div>
       <div class="filter-row">
         <select id="filter-status" aria-label="กรอง status">
           <option value="">ทุกสถานะ</option>
@@ -5410,8 +6645,8 @@ select { cursor: pointer; }
       <div class="filter-row">
         <label><input type="checkbox" id="filter-flags"> มี flag</label>
         <label><input type="checkbox" id="filter-haspdf"> มี catalog</label>
-        <button class="mini-btn" onclick="expandAll()" title="แตกทุก section">⊞</button>
-        <button class="mini-btn" onclick="collapseAll()" title="หุบทุก section">⊟</button>
+        <button class="mini-btn" onclick="expandAll()" title="แตกทุก section" aria-label="expand all">⊞</button>
+        <button class="mini-btn" onclick="collapseAll()" title="หุบทุก section" aria-label="collapse all">⊟</button>
       </div>
     </div>
     <div class="tree-scroll" id="tree" role="tree" aria-label="rows"></div>
@@ -5422,37 +6657,46 @@ select { cursor: pointer; }
     <!-- Top: TOR -->
     <div class="split-top">
       <h2>
-        <span class="pane-title"><span class="icon" aria-hidden="true">📄</span><span>TOR</span> <span style="font-weight:400;color:var(--c-text-faint)" id="tor-info"></span></span>
+        <span class="pane-title"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg><span>TOR</span> <span style="font-weight:400;color:var(--c-text-faint)" id="tor-info"></span></span>
       </h2>
       <div class="canvas-toolbar" role="toolbar" aria-label="TOR navigation">
-        <button onclick="torPrev()" title="หน้าก่อน" aria-label="หน้าก่อน">◀</button>
+        <button onclick="torPrev()" title="หน้าก่อน" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
         <span class="info" id="tor-page-info">— / —</span>
-        <button onclick="torNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป">▶</button>
+        <button onclick="torNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
         <span class="info" id="tor-status">เลือก row เพื่อดู</span>
         <span style="flex:1"></span>
-        <button onclick="torZoom(-1)" title="ย่อ" aria-label="ย่อ">−</button>
-        <button onclick="torZoom(1)" title="ขยาย" aria-label="ขยาย">＋</button>
-        <button onclick="torJumpToMatch()" title="ไปยังหน้าที่เจอ">⌖</button>
+        <button onclick="torZoom(-1)" title="ย่อ" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
+        <button onclick="torZoom(1)" title="ขยาย" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
+        <button onclick="torJumpToMatch()" title="ไปยังหน้าที่เจอ" aria-label="jump to match"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-target"/></svg></button>
       </div>
       <div class="tor-canvas" id="tor-canvas">
-        <div class="empty-canvas">เลือก row เพื่อดู TOR</div>
+        <div class="empty-state">
+          <div class="es-icon"><svg class="ico" aria-hidden="true"><use href="#i-file"/></svg></div>
+          <div class="es-title">No row selected</div>
+          <div class="es-body">เลือก row จากต้นไม้ด้านซ้ายเพื่อดูเนื้อหา TOR ที่เกี่ยวข้อง</div>
+          <button class="es-cta" onclick="openCmdK()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-search"/></svg><span>Browse rows (⌘K)</span></button>
+        </div>
       </div>
     </div>
 
     <!-- Bottom: xlsx preview -->
     <div class="split-bot">
       <h2>
-        <span class="pane-title"><span class="icon" aria-hidden="true">📊</span><span>Comply.xlsx</span> <span style="font-weight:400;color:var(--c-text-faint)" id="xlsx-info"></span></span>
+        <span class="pane-title"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-chart"/></svg><span>Comply.xlsx</span> <span style="font-weight:400;color:var(--c-text-faint)" id="xlsx-info"></span></span>
       </h2>
       <div class="canvas-toolbar" role="toolbar" aria-label="spreadsheet context">
         <span class="info">บริบท ±<span id="ctx-radius">6</span> rows</span>
-        <button onclick="ctxRadius(-2)" title="ลด context">−2</button>
-        <button onclick="ctxRadius(2)" title="เพิ่ม context">+2</button>
+        <button onclick="ctxRadius(-2)" title="ลด context" aria-label="ลด context">−2</button>
+        <button onclick="ctxRadius(2)" title="เพิ่ม context" aria-label="เพิ่ม context">+2</button>
         <span style="flex:1"></span>
         <span class="info">คลิกแถวเพื่อ select</span>
       </div>
       <div class="xlsx-wrap" id="xlsx-wrap">
-        <div class="empty-canvas">เลือก row จากต้นไม้</div>
+        <div class="empty-state">
+          <div class="es-icon"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg></div>
+          <div class="es-title">Comply spec context</div>
+          <div class="es-body">เลือก row จากต้นไม้ด้านซ้าย จะแสดง ±6 rows รอบ row ที่เลือก</div>
+        </div>
       </div>
     </div>
   </section>
@@ -5460,43 +6704,56 @@ select { cursor: pointer; }
   <!-- ───── RIGHT: Catalog PDF ──────────────────────────────────── -->
   <section class="pane pdf-pane" aria-label="catalog PDF">
     <h2>
-      <span class="pane-title"><span class="icon" aria-hidden="true">📑</span><span>Catalog</span></span>
+      <span class="pane-title"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>Catalog</span></span>
       <span class="filename" id="pdf-filename">(ไม่มี)</span>
-      <button class="edit-toggle-btn" id="edit-toggle-btn" onclick="toggleEditMode()" title="Edit annotations" aria-pressed="false">✏ Edit</button>
+      <button class="edit-toggle-btn" id="edit-toggle-btn" onclick="toggleEditMode()" title="Edit annotations" aria-pressed="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-pencil"/></svg><span>Edit</span></button>
     </h2>
     <div class="canvas-toolbar" role="toolbar" aria-label="catalog navigation">
-      <button onclick="pdfPrev()" title="หน้าก่อน" aria-label="หน้าก่อน">◀</button>
+      <button onclick="pdfPrev()" title="หน้าก่อน" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
       <span class="info" id="pdf-page-info">— / —</span>
-      <button onclick="pdfNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป">▶</button>
+      <button onclick="pdfNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
       <span style="flex:1"></span>
-      <button onclick="pdfZoom(-1)" title="ย่อ" aria-label="ย่อ">−</button>
-      <button onclick="pdfZoom(1)" title="ขยาย" aria-label="ขยาย">＋</button>
+      <button onclick="pdfZoom(-1)" title="ย่อ" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
+      <button onclick="pdfZoom(1)" title="ขยาย" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
       <label><input type="checkbox" id="hl-toggle" checked onchange="renderPdf()"> highlight</label>
-      <button onclick="openInBrowser()" title="เปิดใน browser">⤴</button>
+      <button onclick="openInBrowser()" title="เปิดใน browser" aria-label="เปิดใน browser"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-external"/></svg></button>
     </div>
     <!-- Edit toolbar (visible only in edit mode) -->
     <div class="edit-toolbar" id="edit-toolbar" style="display:none;">
-      <button class="tool active" data-tool="select" onclick="setTool('select')" title="Select / move (V)">⬚</button>
-      <button class="tool" data-tool="drawRect" onclick="setTool('drawRect')" title="Draw rectangle (R)">▭</button>
-      <button class="tool" data-tool="addText" onclick="setTool('addText')" title="Add text (T)">T</button>
-      <button onclick="deleteSelected()" title="Delete selected (Del)">🗑</button>
+      <button class="tool active" data-tool="select" onclick="setTool('select')" title="Select / move (V)" aria-label="select tool"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-cursor"/></svg></button>
+      <button class="tool" data-tool="drawRect" onclick="setTool('drawRect')" title="Draw rectangle (R)" aria-label="draw rectangle"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-square"/></svg></button>
+      <button class="tool" data-tool="addText" onclick="setTool('addText')" title="Add text (T)" aria-label="add text"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-text"/></svg></button>
+      <button onclick="deleteSelected()" title="Delete selected (Del)" aria-label="delete"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg></button>
       <span class="sep"></span>
-      <button onclick="undo()" id="undo-btn" disabled title="Undo (⌘Z)">↶</button>
-      <button onclick="redo()" id="redo-btn" disabled title="Redo (⇧⌘Z)">↷</button>
+      <button onclick="undo()" id="undo-btn" disabled title="Undo (⌘Z)" aria-label="undo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-undo"/></svg></button>
+      <button onclick="redo()" id="redo-btn" disabled title="Redo (⇧⌘Z)" aria-label="redo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-redo"/></svg></button>
       <span class="sep"></span>
-      <button onclick="showHistory()" title="Version history">⏰ History</button>
+      <button onclick="showHistory()" title="Version history"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></button>
       <span style="flex:1"></span>
       <span class="dirty-indicator" id="dirty-ind"></span>
-      <button onclick="saveEdits()" id="save-btn" class="save-btn" disabled title="Save (⌘S)">💾 Save</button>
+      <button onclick="saveEdits()" id="save-btn" class="save-btn" disabled title="Save (⌘S)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save</span></button>
     </div>
-    <!-- Manual-annotate mode banner -->
-    <div class="manual-mode-banner" id="manual-banner">
+    <!-- Re-annotate / Manual-annotate wizard banner -->
+    <div class="manual-mode-banner" id="manual-banner" role="dialog" aria-label="annotate wizard">
+      <div class="wiz-progress" id="wiz-progress" aria-hidden="true"></div>
       <div class="target-info" id="manual-target-info">—</div>
-      <button class="cancel" onclick="cancelManualAnnotate()">✕ Cancel</button>
-      <button class="save" id="manual-save-btn" onclick="saveManualAnnotate()" disabled>✓ Save & update Col D</button>
+      <div class="wiz-actions">
+        <button class="wiz-pdf-btn" id="wiz-pdf-btn" onclick="toggleWizPdfPicker(event)" title="เปลี่ยน catalog PDF">
+          <svg class="ico ico-sm wiz-pdf-icon" aria-hidden="true"><use href="#i-file"/></svg>
+          <span class="wiz-pdf-label" id="wiz-pdf-current">…</span>
+          <svg class="ico ico-xs wiz-pdf-caret" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+        <button class="back" id="wiz-back-btn" onclick="wizBack()" disabled><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg><span>Back</span></button>
+        <button class="cancel" onclick="cancelManualAnnotate()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg><span>Cancel</span></button>
+        <button class="save" id="manual-save-btn" onclick="saveManualAnnotate()" disabled><svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg><span>Save</span></button>
+      </div>
     </div>
     <div class="pdf-canvas" id="pdf-canvas">
-      <div class="empty-canvas">เลือก row ที่อ้างอิง catalog</div>
+      <div class="empty-state">
+        <div class="es-icon"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg></div>
+        <div class="es-title">Catalog preview</div>
+        <div class="es-body">เลือก row ที่อ้างอิง catalog ใน Col D — ระบบจะ highlight ตำแหน่งให้ตรงกับเนื้อหา</div>
+      </div>
     </div>
     <div class="pdf-annots" id="pdf-annots" aria-label="annotations on current page"></div>
   </section>
@@ -5505,11 +6762,11 @@ select { cursor: pointer; }
 <!-- Per-PDF history modal (catalog edits) -->
 <div class="modal-bg" id="history-modal" role="dialog" aria-modal="true" aria-labelledby="history-modal-title" onclick="if(event.target.id==='history-modal') closeHistory()">
   <div class="modal">
-    <h3 id="history-modal-title">📑 Catalog edit history <button class="close" onclick="closeHistory()" aria-label="ปิด">✕</button></h3>
+    <h3 id="history-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-clock"/></svg><span>Catalog edit history</span><button class="close" onclick="closeHistory()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button></h3>
     <div id="history-info" style="font-size:var(--t-sm);color:var(--c-text-soft);margin-bottom:var(--s-4);"></div>
     <ul id="history-list" style="list-style:none;padding:0;margin:0;"></ul>
     <div style="margin-top:var(--s-6);display:flex;gap:var(--s-4);">
-      <button onclick="manualSnapshot()" class="btn">📷 Snapshot now</button>
+      <button onclick="manualSnapshot()" class="btn"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-camera"/></svg><span>Snapshot now</span></button>
       <button onclick="closeHistory()" class="btn">Close</button>
     </div>
   </div>
@@ -5518,22 +6775,22 @@ select { cursor: pointer; }
 <!-- Project-level versions modal (snap, restore, diff via version.py) -->
 <div class="modal-bg" id="versions-modal" role="dialog" aria-modal="true" aria-labelledby="versions-modal-title" onclick="if(event.target.id==='versions-modal') closeVersions()">
   <div class="modal versions-modal-body">
-    <h3 id="versions-modal-title">📚 Project versions
-      <button class="close" onclick="closeVersions()" aria-label="ปิด">✕</button>
+    <h3 id="versions-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-package"/></svg><span>Project versions</span>
+      <button class="close" onclick="closeVersions()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
     </h3>
     <div id="versions-sync-badge"></div>
     <div id="versions-info" style="font-size:var(--t-sm);color:var(--c-text-soft);margin-bottom:var(--s-5);"></div>
 
     <div class="versions-snap-form">
       <input type="text" id="versions-tag" placeholder='tag (เช่น "before-rcbo-edit")' aria-label="snapshot tag">
-      <button class="btn snap-quick" onclick="takeProjectSnap(false)">📷 Quick snap</button>
-      <button class="btn snap-full"  onclick="takeProjectSnap(true)" title="รวม output/ ทั้งหมด (~200 MB)">📦 Full snap</button>
-      <button class="btn auto-snap" onclick="autoSnapNow()" title="snap เฉพาะถ้า xlsx เปลี่ยน">⚡ Auto</button>
+      <button class="btn snap-quick" onclick="takeProjectSnap(false)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-camera"/></svg><span>Quick snap</span></button>
+      <button class="btn snap-full"  onclick="takeProjectSnap(true)" title="รวม output/ ทั้งหมด (~200 MB)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Full snap</span></button>
+      <button class="btn auto-snap" onclick="autoSnapNow()" title="snap เฉพาะถ้า xlsx เปลี่ยน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-zap"/></svg><span>Auto</span></button>
     </div>
 
     <div class="versions-actions" id="versions-bulk-actions">
-      <button class="btn" onclick="pruneVersions()">🗑 Prune (keep 10)</button>
-      <button class="btn" onclick="loadVersions()">↻ Refresh</button>
+      <button class="btn" onclick="pruneVersions()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg><span>Prune (keep 10)</span></button>
+      <button class="btn" onclick="loadVersions()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Refresh</span></button>
       <span style="flex:1"></span>
       <span class="diff-helper" id="diff-helper">เลือก 2 snapshots เพื่อ diff</span>
     </div>
@@ -5554,8 +6811,8 @@ select { cursor: pointer; }
 <!-- HITL Learning modal -->
 <div class="modal-bg" id="learn-modal" role="dialog" aria-modal="true" aria-labelledby="learn-modal-title" onclick="if(event.target.id==='learn-modal') closeLearning()">
   <div class="modal" style="min-width:780px;max-width:1000px;">
-    <h3 id="learn-modal-title">🧠 HITL Learning
-      <button class="close" onclick="closeLearning()" aria-label="ปิด">✕</button>
+    <h3 id="learn-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg><span>HITL Learning</span>
+      <button class="close" onclick="closeLearning()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
     </h3>
     <div style="font-size:var(--t-sm);color:var(--c-text-soft);margin-bottom:var(--s-5);">
       Core proposes → user does visual proof → corrections become rules.
@@ -5573,7 +6830,7 @@ select { cursor: pointer; }
         <option value="row_format_d">row_format_d</option>
       </select>
       <span style="flex:1"></span>
-      <button class="btn save-btn" onclick="runRetrain()">🔄 Retrain now</button>
+      <button class="btn save-btn" onclick="runRetrain()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Retrain now</span></button>
     </div>
 
     <div class="learn-pattern-list" id="learn-pattern-list"></div>
@@ -5590,8 +6847,8 @@ select { cursor: pointer; }
 <!-- Audit log + DB stats modal -->
 <div class="modal-bg" id="audit-modal" role="dialog" aria-modal="true" aria-labelledby="audit-modal-title" onclick="if(event.target.id==='audit-modal') closeAudit()">
   <div class="modal" style="min-width:780px;max-width:1000px;">
-    <h3 id="audit-modal-title">📊 Database &amp; Audit
-      <button class="close" onclick="closeAudit()" aria-label="ปิด">✕</button>
+    <h3 id="audit-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg><span>Database &amp; Audit</span>
+      <button class="close" onclick="closeAudit()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
     </h3>
 
     <!-- DB stats summary -->
@@ -5599,7 +6856,7 @@ select { cursor: pointer; }
 
     <!-- Search bar (FTS5 over rows) -->
     <div class="audit-search-row">
-      <input type="search" id="audit-search" placeholder="🔎 ค้นหาข้าม Col A/B/C/D/E (FTS5)…" oninput="onAuditSearch()" aria-label="full-text search">
+      <input type="search" id="audit-search" placeholder="ค้นหาข้าม Col A/B/C/D/E (FTS5)…" oninput="onAuditSearch()" aria-label="full-text search">
       <select id="audit-action-filter" onchange="loadAudit()" aria-label="กรอง action">
         <option value="">[all actions]</option>
         <option value="status_change">status_change</option>
@@ -5626,8 +6883,8 @@ select { cursor: pointer; }
 <!-- Auto-annotate modal -->
 <div class="modal-bg" id="auto-modal" role="dialog" aria-modal="true" aria-labelledby="auto-modal-title" onclick="if(event.target.id==='auto-modal') closeAuto()">
   <div class="modal" style="min-width:640px;max-width:800px;">
-    <h3 id="auto-modal-title">✨ Auto-annotate <span id="auto-title" style="font-weight:400;color:var(--c-text-soft);font-size:var(--t-base);"></span>
-      <button class="close" onclick="closeAuto()" aria-label="ปิด">✕</button>
+    <h3 id="auto-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Auto-annotate</span> <span id="auto-title" style="font-weight:400;color:var(--c-text-soft);font-size:var(--t-base);"></span>
+      <button class="close" onclick="closeAuto()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
     </h3>
 
     <!-- Per-row preview -->
@@ -5653,7 +6910,7 @@ select { cursor: pointer; }
         <label style="font-size:var(--t-sm);"><input type="checkbox" id="auto-write-pdf" checked> เขียน rect+label ลง PDF</label>
         <span style="flex:1"></span>
         <button class="btn" onclick="closeAuto()">Cancel</button>
-        <button class="btn" onclick="showBatchAuto()">📚 Batch mode…</button>
+        <button class="btn" onclick="showBatchAuto()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Batch mode…</span></button>
         <button class="btn save-btn" onclick="applyAutoSingle()">✓ Apply</button>
       </div>
     </div>
@@ -5674,27 +6931,144 @@ select { cursor: pointer; }
   </div>
 </div>
 
+<!-- ─── Command palette (⌘K) — fuzzy row search + actions ─── -->
+<div class="cmdk-bg" id="cmdk-bg" onclick="if(event.target.id==='cmdk-bg') closeCmdK()">
+  <div class="cmdk" role="dialog" aria-modal="true" aria-labelledby="cmdk-input">
+    <div class="cmdk-input-wrap">
+      <svg class="ico" aria-hidden="true"><use href="#i-search"/></svg>
+      <input type="text" id="cmdk-input" class="cmdk-input" placeholder="ค้น row, section, หรือ action…" autocomplete="off" spellcheck="false">
+      <span class="cmdk-hint"><span class="kbd">esc</span></span>
+    </div>
+    <div class="cmdk-list" id="cmdk-list" role="listbox"></div>
+  </div>
+</div>
+
+<!-- ─── Onboarding card (first launch) ─── -->
+<div class="onboard-bg" id="onboard-bg" onclick="if(event.target.id==='onboard-bg') closeOnboarding()">
+  <div class="onboard-card" role="dialog" aria-labelledby="onboard-title">
+    <h2 id="onboard-title">Welcome to Comply Verify</h2>
+    <p>คลิกแถวจาก tree ด้านซ้าย → ดู TOR + xlsx + catalog ในที่เดียว → ตัดสิน verdict ด้วย <span class="kbd">1</span>–<span class="kbd">4</span> หรือคลิกใน action bar ด้านล่าง</p>
+    <ul class="onboard-shortcuts">
+      <li><span class="kbd">⌘K</span><span>Command palette / ค้นทุกอย่าง</span></li>
+      <li><span class="kbd">J</span><span class="kbd">K</span><span>row ถัดไป / ก่อนหน้า</span></li>
+      <li><span class="kbd">N</span><span>row uncertain ถัดไป</span></li>
+      <li><span class="kbd">1</span>–<span class="kbd">4</span><span>verdict pass/fail/fix/skip</span></li>
+      <li><span class="kbd">[</span><span class="kbd">]</span><span>หน้า PDF</span></li>
+      <li><span class="kbd">,</span><span class="kbd">.</span><span>หน้า TOR</span></li>
+      <li><span class="kbd">?</span><span>เปิด help นี้</span></li>
+      <li><span class="kbd">⌘S</span><span>save edits</span></li>
+    </ul>
+    <p style="font-size:var(--t-sm);color:var(--c-text-soft)">คลิก Col D เพื่อ Re-annotate / Auto-annotate / Edit. กด Settings ด้านขวาบนเพื่อปรับ theme + language</p>
+    <div class="onboard-actions">
+      <button class="btn" onclick="closeOnboarding()">Skip</button>
+      <button class="btn btn-primary" onclick="closeOnboarding();dontShowOnboardingAgain()">Got it</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Settings panel ─── -->
+<div class="modal-bg" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title" onclick="if(event.target.id==='settings-modal') closeSettings()">
+  <div class="modal" style="min-width:480px;max-width:560px;">
+    <h3 id="settings-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span><button class="close" onclick="closeSettings()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button></h3>
+    <div style="display:flex;flex-direction:column;gap:var(--s-5)">
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>Theme</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Light / Dark / System / High contrast</span></span>
+        <select id="settings-theme" onchange="setThemeFromSettings(this.value)" style="width:auto;min-width:140px">
+          <option value="">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="hi-contrast">High contrast</option>
+        </select>
+      </label>
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>LLM provider</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">For low-confidence Auto-annotate proposals</span></span>
+        <span id="settings-llm-status" style="font-family:var(--f-mono);font-size:var(--t-sm);padding:2px var(--s-3);border-radius:var(--r-sm);background:var(--c-surface-2)">off</span>
+      </label>
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>Reduce motion</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Disable animations &amp; transitions</span></span>
+        <input type="checkbox" id="settings-reduce-motion" onchange="setReduceMotion(this.checked)" style="width:auto">
+      </label>
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>Show keyboard hints</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Bottom-right shortcut overlay</span></span>
+        <input type="checkbox" id="settings-show-kbd" onchange="setShowKbd(this.checked)" style="width:auto" checked>
+      </label>
+      <div style="border-top:1px solid var(--c-divider);padding-top:var(--s-5);font-size:var(--t-sm);color:var(--c-text-soft)">
+        <strong>Keyboard shortcuts</strong><br>
+        <code style="font-family:var(--f-mono);font-size:var(--t-xs)">⌘K</code> command palette ·
+        <code style="font-family:var(--f-mono);font-size:var(--t-xs)">?</code> this help ·
+        <code style="font-family:var(--f-mono);font-size:var(--t-xs)">J/K</code> nav ·
+        <code style="font-family:var(--f-mono);font-size:var(--t-xs)">1–4</code> verdict
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Bulk re-annotate modal (Sprint 3) ─── -->
+<div class="modal-bg" id="bulk-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-modal-title" onclick="if(event.target.id==='bulk-modal') closeBulk()">
+  <div class="modal" style="min-width:560px;max-width:760px;">
+    <h3 id="bulk-modal-title"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg><span>Apply pattern to similar rows</span><button class="close" onclick="closeBulk()" aria-label="ปิด"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button></h3>
+    <div id="bulk-info" style="font-size:var(--t-sm);color:var(--c-text-muted);margin-bottom:var(--s-5)"></div>
+    <div id="bulk-list" style="max-height:50vh;overflow:auto;border:1px solid var(--c-border);border-radius:var(--r-md)"></div>
+    <div style="display:flex;gap:var(--s-3);margin-top:var(--s-5);align-items:center">
+      <span style="flex:1;font-size:var(--t-sm);color:var(--c-text-soft)" id="bulk-summary"></span>
+      <button class="btn" onclick="closeBulk()">Cancel</button>
+      <button class="btn btn-primary" id="bulk-apply" onclick="applyBulk()">Apply selected</button>
+    </div>
+  </div>
+</div>
+
 <!-- Floating action bar -->
-<div class="action-bar" id="action-bar" style="display:none;" role="toolbar" aria-label="row verdict">
+<div class="action-bar bottom-sheet" id="action-bar" style="display:none;" role="toolbar" aria-label="row verdict">
   <div class="ab-top">
     <div class="ab-row-info" id="ab-row-info">—</div>
     <div class="ab-flags" id="ab-flags"></div>
     <span class="ab-spacer"></span>
-    <div class="ab-buttons">
-      <button class="ab-btn pass" onclick="setStatus('pass')" aria-label="ผ่าน">✓ ผ่าน <span class="kbd" aria-hidden="true">1</span></button>
-      <button class="ab-btn fail" onclick="setStatus('fail')" aria-label="ไม่ผ่าน">✗ ไม่ผ่าน <span class="kbd" aria-hidden="true">2</span></button>
-      <button class="ab-btn fix"  onclick="setStatus('need_fix')" aria-label="ต้องแก้">⚠ แก้ <span class="kbd" aria-hidden="true">3</span></button>
-      <button class="ab-btn skip" onclick="setStatus('skip')" aria-label="ข้าม">⏭ ข้าม <span class="kbd" aria-hidden="true">4</span></button>
-      <button class="ab-btn auto" onclick="showAutoAnnotate()" title="Auto-annotate row (preview)">✨ Auto</button>
-      <button class="ab-btn mark" id="ab-mark-btn" onclick="startManualAnnotate()" title="ลาก rect ใน catalog เพื่อแก้ Col D ที่เป็น 'ยินดีปฏิบัติ' (เมื่อ AI หาเนื้อหาไม่เจอ)">📍 Mark</button>
+
+    <!-- Verdict — segmented control (4 mutually-exclusive options) -->
+    <div class="verdict-control" role="radiogroup" aria-label="verdict">
+      <button class="ab-btn pass" role="radio" aria-checked="false" onclick="setStatus('pass')" aria-label="ผ่าน">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>
+        <span class="vc-label">ผ่าน</span>
+        <span class="kbd" aria-hidden="true">1</span>
+      </button>
+      <button class="ab-btn fail" role="radio" aria-checked="false" onclick="setStatus('fail')" aria-label="ไม่ผ่าน">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        <span class="vc-label">ไม่ผ่าน</span>
+        <span class="kbd" aria-hidden="true">2</span>
+      </button>
+      <button class="ab-btn fix" role="radio" aria-checked="false" onclick="setStatus('need_fix')" aria-label="ต้องแก้">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-alert"/></svg>
+        <span class="vc-label">แก้</span>
+        <span class="kbd" aria-hidden="true">3</span>
+      </button>
+      <button class="ab-btn skip" role="radio" aria-checked="false" onclick="setStatus('skip')" aria-label="ข้าม">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-skip"/></svg>
+        <span class="vc-label">ข้าม</span>
+        <span class="kbd" aria-hidden="true">4</span>
+      </button>
     </div>
-    <label style="font-size:var(--t-sm);display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--c-text-muted);margin-left:var(--s-4);">
-      <input type="checkbox" id="auto-advance" onchange="toggleAutoAdvance()" checked> auto-next
+
+    <!-- Secondary actions (Auto, Mark) — visually subordinate -->
+    <div class="ab-secondary">
+      <button class="ab-btn auto" onclick="showAutoAnnotate()" title="Auto-annotate (preview)">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Auto</span>
+      </button>
+      <button class="ab-btn mark" id="ab-mark-btn" onclick="startManualAnnotate()" title="ลาก rect ใน catalog เพื่อแก้ Col D">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-pin"/></svg><span>Mark</span>
+      </button>
+    </div>
+
+    <label class="ab-toggle" title="ไป row ถัดไปอัตโนมัติหลัง verdict">
+      <input type="checkbox" id="auto-advance" onchange="toggleAutoAdvance()" checked>
+      <span class="ab-toggle-track"></span>
+      <span class="ab-toggle-label">auto-next</span>
     </label>
   </div>
   <div class="ab-bottom">
     <textarea id="ab-notes" placeholder="บันทึก / Notes…" oninput="saveNotesDebounced()" aria-label="row notes"></textarea>
-    <button class="reset-btn" onclick="setStatus('unverified')" title="reset verdict">↺ reset</button>
+    <button class="reset-btn" onclick="setStatus('unverified')" title="reset verdict">
+      <svg class="ico ico-sm" aria-hidden="true"><use href="#i-rotate"/></svg><span>reset</span>
+    </button>
   </div>
 </div>
 
@@ -5702,14 +7076,29 @@ select { cursor: pointer; }
 <div id="toasts" class="toast-stack" role="region" aria-live="polite" aria-label="notifications"></div>
 
 <aside class="kbd-help" aria-label="keyboard shortcuts">
-  <span class="kbd-group"><span class="kbd">J</span><span class="kbd">K</span> rows</span>
-  <span class="kbd-group"><span class="kbd">N</span> next-uncertain</span>
-  <span class="kbd-group"><span class="kbd">1</span>–<span class="kbd">4</span> verdict</span>
-  <span class="kbd-group"><span class="kbd">[</span><span class="kbd">]</span> PDF</span>
-  <span class="kbd-group"><span class="kbd">,</span><span class="kbd">.</span> TOR</span>
+  <span class="kbd-group"><span class="kbd">J</span><span class="kbd">K</span><span class="kbd-text">rows</span></span>
+  <span class="kbd-group"><span class="kbd">N</span><span class="kbd-text">uncertain</span></span>
+  <span class="kbd-group"><span class="kbd">1</span>–<span class="kbd">4</span><span class="kbd-text">verdict</span></span>
+  <span class="kbd-group"><span class="kbd">[</span><span class="kbd">]</span><span class="kbd-text">PDF</span></span>
+  <span class="kbd-group"><span class="kbd">,</span><span class="kbd">.</span><span class="kbd-text">TOR</span></span>
+  <span class="kbd-group"><span class="kbd">?</span><span class="kbd-text">help</span></span>
 </aside>
 
 <script>
+// ── Icon helper ───────────────────────────────────────────────
+// Returns an inline <svg><use href="#i-{name}"/></svg> string for use
+// in template literals. Centralises icon rendering so every glyph in
+// the UI comes from the same SVG sprite (no emoji mixing).
+function ico(name, size = 16, extraCls = '') {
+  let cls = 'ico';
+  if (size <= 12) cls += ' ico-xs';
+  else if (size === 14) cls += ' ico-sm';
+  else if (size === 20) cls += ' ico-lg';
+  else if (size >= 24) cls += ' ico-xl';
+  if (extraCls) cls += ' ' + extraCls;
+  return `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+}
+
 let DATA = null;
 let SELECTED_ROW = null;
 let ROWS_BY_NUM = {};
@@ -5851,11 +7240,21 @@ function visibleRowsInNode(node) {
 }
 function nodeHasMatch(node) { return visibleRowsInNode(node) > 0; }
 
+// Tree render is debounced on rapid filter changes (Sprint S3.1)
+let _TREE_RENDER_PENDING = false;
 function renderTree() {
-  const out = [];
-  for (const c of TREE_ROOT.children) renderNode(c, 0, out);
-  document.getElementById('tree').innerHTML = out.join('');
-  document.getElementById('tree-count').textContent = `(${VISIBLE_ROWS.size})`;
+  if (_TREE_RENDER_PENDING) return;
+  _TREE_RENDER_PENDING = true;
+  // Use rAF so multiple renderTree() calls within a frame coalesce
+  requestAnimationFrame(() => {
+    _TREE_RENDER_PENDING = false;
+    const out = [];
+    for (const c of TREE_ROOT.children) renderNode(c, 0, out);
+    const treeEl = document.getElementById('tree');
+    // innerHTML in one shot is faster than DocumentFragment for static markup
+    treeEl.innerHTML = out.join('');
+    document.getElementById('tree-count').textContent = `(${VISIBLE_ROWS.size})`;
+  });
 }
 
 function renderNode(node, depth, out) {
@@ -5868,11 +7267,11 @@ function renderNode(node, depth, out) {
   const repRow = node.rows[0];
   const r = repRow ? ROWS_BY_NUM[repRow] : null;
   const status = (DATA.status && DATA.status[repRow]) ? DATA.status[repRow].status : 'unverified';
-  const stIcon = {pass:'✓', fail:'✗', need_fix:'⚠', skip:'⏭', unverified:''}[status] || '';
-  const stCol  = {pass:'#10b981', fail:'#ef4444', need_fix:'#f59e0b', skip:'#6b7280', unverified:''}[status] || '';
 
   const flagCount = r && r.auto_flags ? r.auto_flags.length : 0;
-  const flagHtml = flagCount ? `<span class="tree-flags" title="${escapeHtml(r.auto_flags.map(f=>f.msg).join(' / '))}" style="color:#d97706">⚠${flagCount}</span>` : '';
+  const flagHtml = flagCount
+    ? `<span class="tree-flags" title="${escapeHtml(r.auto_flags.map(f=>f.msg).join(' / '))}">${ico('alert',12)}${flagCount}</span>`
+    : '';
 
   const icon = ({section:'§', item:'›', sub:'·', root:''})[node.type] || '';
   const iconCls = node.type;
@@ -5891,17 +7290,17 @@ function renderNode(node, depth, out) {
   }
   const rowAttr = repRow ? `data-row="${repRow}"` : '';
   const sel = (SELECTED_ROW === repRow) ? ' selected' : '';
+  const stAttr = (status && status !== 'unverified') ? ` data-status="${status}"` : '';
 
   out.push(`<div class="tree-node${expanded?' expanded':''}" data-key="${escapeHtml(node.key)}" style="padding-left:${indent}px">`);
-  out.push(`<div class="tree-row${sel}" ${rowAttr} onclick="onTreeRowClick(event, '${escapeHtml(node.key)}', ${repRow||'null'})">`);
+  out.push(`<div class="tree-row${sel}"${stAttr} ${rowAttr} onclick="onTreeRowClick(event, '${escapeHtml(node.key)}', ${repRow||'null'})">`);
   if (hasKids && node.children.length) {
-    out.push(`<span class="tree-chev" onclick="event.stopPropagation();toggleNode('${escapeHtml(node.key)}')">${expanded?'▼':'▶'}</span>`);
+    out.push(`<span class="tree-chev" onclick="event.stopPropagation();toggleNode('${escapeHtml(node.key)}')">${expanded?ico('chevron-down',10):ico('chevron-right',10)}</span>`);
   } else {
     out.push(`<span class="tree-chev empty">·</span>`);
   }
   out.push(`<span class="tree-icon ${iconCls}">${icon}</span>`);
   out.push(`<span class="tree-label">${escapeHtml(label)}</span>`);
-  if (stIcon) out.push(`<span class="tree-status" style="color:${stCol}">${stIcon}</span>`);
   // Confidence dot — at-a-glance for which rows still need review
   out.push(confDotHtml(r));
   out.push(flagHtml);
@@ -5915,15 +7314,13 @@ function renderNode(node, depth, out) {
     if (!rr) continue;
     const sel2 = (SELECTED_ROW === rn) ? ' selected' : '';
     const st2 = (DATA.status && DATA.status[rn]) ? DATA.status[rn].status : 'unverified';
-    const ic2 = {pass:'✓', fail:'✗', need_fix:'⚠', skip:'⏭', unverified:''}[st2] || '';
-    const sc2 = {pass:'#10b981', fail:'#ef4444', need_fix:'#f59e0b', skip:'#6b7280', unverified:''}[st2] || '';
+    const stAttr2 = (st2 && st2 !== 'unverified') ? ` data-status="${st2}"` : '';
     const fc2 = rr.auto_flags ? rr.auto_flags.length : 0;
-    const fh2 = fc2 ? `<span class="tree-flags" title="${escapeHtml(rr.auto_flags.map(f=>f.msg).join(' / '))}" style="color:#d97706">⚠${fc2}</span>` : '';
+    const fh2 = fc2 ? `<span class="tree-flags" title="${escapeHtml(rr.auto_flags.map(f=>f.msg).join(' / '))}">${ico('alert',12)}${fc2}</span>` : '';
     const lab2 = (rr.B || rr.C || '').toString().trim().replace(/\s+/g,' ').slice(0, 70);
-    out.push(`<div class="tree-row${sel2}" data-row="${rn}" onclick="onTreeRowClick(event, null, ${rn})" style="padding-left:${(depth+1)*12+18}px">`);
+    out.push(`<div class="tree-row${sel2}"${stAttr2} data-row="${rn}" onclick="onTreeRowClick(event, null, ${rn})" style="padding-left:${(depth+1)*12+18}px">`);
     out.push(`<span class="tree-chev empty">·</span><span class="tree-icon">·</span>`);
     out.push(`<span class="tree-label">R${rn} ${escapeHtml(lab2)}</span>`);
-    if (ic2) out.push(`<span class="tree-status" style="color:${sc2}">${ic2}</span>`);
     out.push(fh2);
     out.push('</div>');
   }
@@ -6067,6 +7464,22 @@ async function saveNotes() {
 async function setStatus(status) {
   if (!SELECTED_ROW) return;
   const notes = document.getElementById('ab-notes').value || '';
+  // Optimistic UI: set verdict button + tree row indicator before round-trip
+  const treeEl = document.querySelector(`.tree-row[data-row="${SELECTED_ROW}"]`);
+  if (treeEl) {
+    if (status && status !== 'unverified') treeEl.setAttribute('data-status', status);
+    else treeEl.removeAttribute('data-status');
+  }
+  // Update verdict-control radio state
+  for (const cls of ['pass','fail','fix','skip']) {
+    const btn = document.querySelector('.verdict-control .ab-btn.' + cls);
+    if (btn) {
+      const target = (cls === 'fix') ? 'need_fix' : cls;
+      const active = (status === target);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-checked', active ? 'true' : 'false');
+    }
+  }
   const r = await fetch('/api/status', {method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({row: SELECTED_ROW, status, notes})});
   const j = await r.json();
@@ -6082,11 +7495,28 @@ async function setStatus(status) {
   }
 }
 
+// ── Skeleton helpers ───────────────────────────────────────────
+function skeletonImage() {
+  return `<div class="skel-stack">
+    <div class="skel skel-img"></div>
+  </div>`;
+}
+function skeletonTable() {
+  return `<div class="skel-stack">
+    <div class="skel skel-line tall" style="width:60%"></div>
+    <div class="skel skel-line" style="width:90%"></div>
+    <div class="skel skel-line" style="width:95%"></div>
+    <div class="skel skel-line" style="width:80%"></div>
+    <div class="skel skel-line" style="width:88%"></div>
+    <div class="skel skel-line" style="width:70%"></div>
+  </div>`;
+}
+
 // ── TOR pane ───────────────────────────────────────────────────
 async function loadTOR(rowNum) {
   const url = `/api/tor_page?row=${rowNum}&dpi=${TOR_DPI}`;
   const c = document.getElementById('tor-canvas');
-  c.innerHTML = '<div class="empty-canvas">กำลังโหลด TOR…</div>';
+  c.innerHTML = skeletonImage();
   try {
     const r = await fetch(url);
     if (!r.ok) {
@@ -6139,17 +7569,22 @@ async function torReload() {
    highlight Y range (in source-pixel coords) sits ~25% from the top of the
    visible viewport. Falls back to top if no Y given. */
 function showImageWithScroll(container, src, y0, y1, alt) {
-  container.innerHTML = `<img src="${src}" alt="${alt||''}">`;
-  const img = container.querySelector('img');
-  img.onload = () => {
+  container.innerHTML = '';
+  const img = document.createElement('img');
+  if (alt) img.alt = alt;
+  container.appendChild(img);
+  const onReady = () => {
     if (!isFinite(y0)) { container.scrollTop = 0; return; }
-    // Source-pixel → rendered-pixel scale (image may be max-width: 100%)
-    const scale = img.clientWidth / img.naturalWidth;
+    const scale = img.clientWidth / (img.naturalWidth || 1);
     const targetMid = ((y0 + (isFinite(y1) ? y1 : y0)) / 2) * scale;
-    // place highlight ~25% from top of visible area
     const offset = container.clientHeight * 0.25;
     container.scrollTop = Math.max(0, targetMid - offset);
   };
+  img.onload = onReady;
+  img.src = src;
+  if (img.complete && (img.naturalWidth > 0 || img.naturalHeight > 0)) {
+    onReady();
+  }
 }
 function torPrev() { if (TOR_PAGE > 1) { TOR_PAGE--; torReload(); } }
 function torNext() { if (TOR_PAGE < TOR_PAGES) { TOR_PAGE++; torReload(); } }
@@ -6159,6 +7594,7 @@ function torJumpToMatch() { TOR_PAGE = TOR_TARGET_PAGE; torReload(); }
 // ── XLSX preview ───────────────────────────────────────────────
 async function loadXlsx(rowNum) {
   const w = document.getElementById('xlsx-wrap');
+  w.innerHTML = skeletonTable();
   const r = await fetch(`/api/row_context?row=${rowNum}&radius=${CTX_RADIUS}`);
   const j = await r.json();
   document.getElementById('ctx-radius').textContent = CTX_RADIUS;
@@ -6302,48 +7738,79 @@ function showColDMenu(e, rowNum) {
   const isCommit = dVal.startsWith('ยินดีปฏิบัติ');
   const hasPdf = !!row.pdf_rel;
   const sec = row.section || '?';
+  const parsed = row.parsed || {};
+  const pType = parsed.type || 'empty';
+  const isBrandModel = (pType === 'brand_model');
+  const role = row.role || 'unknown';
+
+  // Re-annotate label changes by role for clarity in the menu
+  let reannLabel = 'Re-annotate (rect + label)';
+  let reannHint  = 'ลบของเก่า แล้ววาดใหม่';
+  if (isBrandModel) {
+    reannLabel = 'Re-annotate ยี่ห้อ + รุ่น';
+    reannHint  = '2 steps · brand → model';
+  } else if (role === 'item') {
+    reannLabel = `Re-annotate ข้อ ${parsed.item || '?'})`;
+  } else if (role === 'sub_item') {
+    reannLabel = `Re-annotate ข้อย่อย ${parsed.subitem || '?'}.`;
+  } else if (role === 'section_header') {
+    reannLabel = 'Re-annotate section';
+  }
 
   const menu = document.createElement('div');
   menu.className = 'col-d-menu';
-  let html = `<div class="menu-header">R${rowNum} · ${escapeHtml(sec)} · ${isCommit ? 'commitment' : 'has reference'}</div>`;
+  let typeBadge = isBrandModel ? '· brand_model'
+                : (isCommit ? '· commitment'
+                : (pType !== 'empty' ? '· '+pType : ''));
+  let html = `<div class="menu-header">R${rowNum} · ${escapeHtml(sec)} ${typeBadge}</div>`;
 
   if (isCommit) {
     // → Switch FROM commitment TO real annotation
     html += `<button class="primary" data-act="mark" ${!hasPdf?'disabled':''}>
-      <span class="icon">📍</span>
+      <span class="icon">${ico('pin',16)}</span>
       <span class="label">Mark in catalog → annotate</span>
       <span class="hint">${hasPdf?'รับ rect + label':'no PDF'}</span>
     </button>`;
+    html += `<button data-act="reannotate">
+      <span class="icon">${ico('refresh',16)}</span>
+      <span class="label">${escapeHtml(reannLabel)}</span>
+      <span class="hint">เลือก PDF ได้</span>
+    </button>`;
     html += `<button data-act="auto" ${!hasPdf?'disabled':''}>
-      <span class="icon">✨</span>
+      <span class="icon">${ico('sparkles',16)}</span>
       <span class="label">Auto-annotate (AI tries again)</span>
       <span class="hint">preview ก่อน apply</span>
     </button>`;
     html += `<div class="sep"></div>`;
     html += `<button data-act="edit">
-      <span class="icon">✏</span>
+      <span class="icon">${ico('pencil',16)}</span>
       <span class="label">Edit Col D manually</span>
       <span class="hint">double-click ก็ได้</span>
     </button>`;
   } else {
-    // → Switch FROM annotation TO commitment, or modify
+    // → Already has a reference — re-annotate is the headline action
+    html += `<button class="primary" data-act="reannotate">
+      <span class="icon">${ico('refresh',16)}</span>
+      <span class="label">${escapeHtml(reannLabel)}</span>
+      <span class="hint">${escapeHtml(reannHint)}</span>
+    </button>`;
     html += `<button data-act="auto">
-      <span class="icon">✨</span>
-      <span class="label">Re-run auto-annotate</span>
-      <span class="hint">เริ่มใหม่</span>
+      <span class="icon">${ico('sparkles',16)}</span>
+      <span class="label">Auto-annotate (AI proposal)</span>
+      <span class="hint">preview ก่อน apply</span>
     </button>`;
     html += `<button data-act="mark" ${!hasPdf?'disabled':''}>
-      <span class="icon">📍</span>
-      <span class="label">Re-mark in catalog</span>
-      <span class="hint">วาด rect ใหม่</span>
+      <span class="icon">${ico('pin',16)}</span>
+      <span class="label">Add extra annotation</span>
+      <span class="hint">ไม่ลบของเก่า</span>
     </button>`;
     html += `<button data-act="edit">
-      <span class="icon">✏</span>
+      <span class="icon">${ico('pencil',16)}</span>
       <span class="label">Edit Col D manually</span>
     </button>`;
     html += `<div class="sep"></div>`;
     html += `<button class="danger" data-act="revert">
-      <span class="icon">↩</span>
+      <span class="icon">${ico('rotate',16)}</span>
       <span class="label">Revert to "ยินดีปฏิบัติตามข้อกำหนด"</span>
       <span class="hint">บันทึกประวัติก่อน</span>
     </button>`;
@@ -6383,6 +7850,9 @@ async function handleColDAction(action, rowNum) {
   switch (action) {
     case 'mark':
       startManualAnnotate();
+      break;
+    case 'reannotate':
+      startReannotate();
       break;
     case 'auto':
       showAutoAnnotate();
@@ -6457,6 +7927,7 @@ async function loadPdf(rel, page, highlight) {
   CURRENT_HIGHLIGHT = highlight;
   PDF_PAGE = page;
   document.getElementById('pdf-filename').textContent = rel;
+  document.getElementById('pdf-canvas').innerHTML = skeletonImage();
   const r = await fetch('/api/pdf_meta?rel=' + encodeURIComponent(rel));
   if (!r.ok) {
     document.getElementById('pdf-canvas').innerHTML = '<div class="empty-canvas">โหลด PDF ไม่ได้</div>';
@@ -6645,7 +8116,12 @@ function toggleEditMode() {
   }
   EDIT_MODE = !EDIT_MODE;
   document.getElementById('edit-toggle-btn').classList.toggle('active', EDIT_MODE);
-  document.getElementById('edit-toggle-btn').textContent = EDIT_MODE ? '👁 View' : '✏ Edit';
+  // Update edit/view toggle button label (preserves SVG icon + text span)
+  const etb = document.getElementById('edit-toggle-btn');
+  etb.innerHTML = EDIT_MODE
+    ? `${ico('eye', 14)}<span>View</span>`
+    : `${ico('pencil', 14)}<span>Edit</span>`;
+  etb.setAttribute('aria-pressed', EDIT_MODE ? 'true' : 'false');
   document.getElementById('edit-toolbar').style.display = EDIT_MODE ? '' : 'none';
   const c = document.getElementById('pdf-canvas');
   c.classList.toggle('edit-mode', EDIT_MODE);
@@ -6706,7 +8182,6 @@ function showPdfPageWithOverlay(container, src, y0, y1) {
   host.className = 'pdf-page-host';
   const img = document.createElement('img');
   img.className = 'pdf-page-img';
-  img.src = src;
   host.appendChild(img);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.classList.add('pdf-overlay', 'editable');
@@ -6714,21 +8189,36 @@ function showPdfPageWithOverlay(container, src, y0, y1) {
   container.appendChild(host);
   OVERLAY_HOST = host;
   OVERLAY_SVG = svg;
-  img.onload = () => {
-    const pageSize = CURRENT_PDF.meta.page_sizes[PDF_PAGE - 1] || [img.naturalWidth, img.naturalHeight];
+  // Drag-to-create / click handlers on the SVG (attach before any paint)
+  svg.addEventListener('pointerdown', onOverlayPointerDown);
+
+  const onReady = () => {
+    const pageSize = (CURRENT_PDF && CURRENT_PDF.meta && CURRENT_PDF.meta.page_sizes[PDF_PAGE - 1])
+                     || [img.naturalWidth || 595, img.naturalHeight || 842];
     svg.setAttribute('viewBox', `0 0 ${pageSize[0]} ${pageSize[1]}`);
     svg.style.width = '100%';
     svg.style.height = '100%';
     refreshOverlay();
     // auto-scroll
     if (isFinite(y0)) {
-      const scale = img.clientWidth / img.naturalWidth;
+      const scale = img.clientWidth / (img.naturalWidth || 1);
       const targetMid = ((y0 + (isFinite(y1) ? y1 : y0)) / 2) * scale;
       container.scrollTop = Math.max(0, targetMid - container.clientHeight * 0.25);
     }
   };
-  // Drag-to-create / click handlers on the SVG
-  svg.addEventListener('pointerdown', onOverlayPointerDown);
+  // Bind handlers BEFORE setting src so a synchronous blob-URL load doesn't
+  // race past the assignment (caused existing rects to be invisible after
+  // toggling Edit mode — refreshOverlay() never fired).
+  img.onload = onReady;
+  img.onerror = () => {
+    container.innerHTML = '<div class="empty-canvas">โหลด PDF page ไม่ได้</div>';
+  };
+  img.src = src;
+  // Defensive: if the image is already complete (cached / blob loaded
+  // synchronously), trigger the handler manually.
+  if (img.complete && (img.naturalWidth > 0 || img.naturalHeight > 0)) {
+    onReady();
+  }
 }
 
 function refreshOverlay() {
@@ -7222,7 +8712,7 @@ async function loadVersions() {
     const sync = await rs.json();
     document.getElementById('versions-info').innerHTML =
       j.available
-        ? `📁 ${escapeHtml(j.root)} · <strong>${j.snapshots.length}</strong> snapshot(s)`
+        ? `${ico('folder',14)} ${escapeHtml(j.root)} · <strong>${j.snapshots.length}</strong> snapshot(s)`
         : '<span style="color:#b91c1c">scripts/version.py ไม่พบ — ระบบ versioning ไม่พร้อม</span>';
     renderSyncBadge(sync);
     refreshSyncIndicators(sync);
@@ -7292,11 +8782,11 @@ function refreshSyncIndicators(sync) {
   } else if (sync.state === 'divergent') {
     bannerCls = 'danger';
     msg = `⚠ ต่างจาก snapshot ล่าสุด (${escapeHtml(sync.latest.id)})`;
-    actions = `<button onclick="showVersions()">📚 ตรวจสอบ</button>`;
+    actions = `<button onclick="showVersions()">${ico('package',14)} ตรวจสอบ</button>`;
   } else if (sync.state === 'incomplete_local') {
     bannerCls = 'danger';
     msg = `⚠ ไฟล์บางส่วนหาย — เทียบกับ snapshot ${escapeHtml(sync.latest.id)}`;
-    actions = `<button onclick="showVersions()">📚 ตรวจสอบ</button>`;
+    actions = `<button onclick="showVersions()">${ico('package',14)} ตรวจสอบ</button>`;
   }
   if (msg) {
     banner.className = 'sync-banner show ' + bannerCls;
@@ -7343,7 +8833,7 @@ function renderVersionItem(s, isLatest) {
         <div class="v-meta">${escapeHtml(s.id)} · ${sizeMB} MB · ${s.n_output} files · ${escapeHtml(ts)}</div>
       </div>
       <div class="v-actions">
-        <button onclick="diffOne('${escapeHtml(s.id)}')" title="Diff กับ snapshot ล่าสุด">📋 diff</button>
+        <button onclick="diffOne('${escapeHtml(s.id)}')" title="Diff กับ snapshot ล่าสุด">diff</button>
         <button class="restore" onclick="restoreVersion('${escapeHtml(s.id)}', false)">↺ restore</button>
         ${s.has_tarball ? `<button class="restore-full" onclick="restoreVersion('${escapeHtml(s.id)}', true)" title="restore output/ ทั้งหมด">↻ full</button>` : ''}
       </div>
@@ -7587,7 +9077,7 @@ function renderBatchRow(plan) {
       <span class="b-row">R${plan.row}</span>
       <span class="b-role ${role}">${role}</span>
       <span class="b-d" title="${escapeHtml(plan.proposed_d || '')}">${escapeHtml(plan.proposed_d || '(empty)').slice(0, 80)}</span>
-      <button onclick="loadAutoPreviewFromBatch(${plan.row})" style="font-size:10px;padding:2px 6px;">👁 view</button>
+      <button onclick="loadAutoPreviewFromBatch(${plan.row})" style="font-size:var(--t-xs);padding:2px 6px;">${ico('eye',12)} view</button>
     </div>`;
 }
 function loadAutoPreviewFromBatch(rowNum) {
@@ -7629,71 +9119,163 @@ async function applyAutoBatch() {
 //      both annotations into the PDF AND auto-fills Col D in xlsx based on
 //      the page where the rect sits
 
-let MANUAL_MODE = false;
+// ── Re-annotate Wizard ────────────────────────────────────────
+// Unified state machine for the manual-annotate (📍 Mark on commitment)
+// AND the brand_model / item / sub_item re-annotate flow. Both run
+// through the same banner UI and the same drawing hook; they differ
+// only in:
+//   • how many (rect, label) pairs the wizard expects (steps[])
+//   • whether existing annots with matching label prefixes should be
+//     deleted before writing the new ones (delete_existing)
+//   • which save endpoint we POST to (manual_annotate vs reannotate)
+let MANUAL_MODE = false;          // true while wizard is active
 let MANUAL_TARGET_ROW = null;
-let MANUAL_SUGGESTED_LABEL = '';
-let MANUAL_SQUARE_ID = null;
-let MANUAL_LABEL_ID = null;
+let WIZ = null;                   // wizard state, see _newWizState()
 
+function _newWizState() {
+  return {
+    mode: 'manual',           // 'manual' | 'reannotate'
+    row: null,
+    pdf_rel: null,
+    pdf_meta: null,
+    candidates: [],
+    steps: [],                // [{label, hint, kind}]
+    drawn: [],                // [{square_id, label_id, content_rect, label_rect, label_text}]
+    current_step: 0,
+    delete_existing: false,
+    delete_prefixes: [],
+    brand_hint: '',
+    model_hint: '',
+    section: '',
+    col_b: '',
+  };
+}
+
+// Public entry points ─────────────────────────────────────────
 async function startManualAnnotate() {
-  if (!SELECTED_ROW) { alert('เลือก row ก่อน'); return; }
+  // Used by the floating action bar's 📍 Mark button — single-step flow
+  // for commitment rows that have no PDF yet (or the user wants to add
+  // a fresh annotation).
+  await _startWizard('manual');
+}
 
-  const cr = await fetch(`/api/manual_annotate/context?row=${SELECTED_ROW}`);
+async function startReannotate() {
+  // Used by the Col D dropdown's "🔁 Re-annotate" entry — multi-step flow
+  // that also deletes prior annotations matching this row's label prefix.
+  await _startWizard('reannotate');
+}
+
+async function _startWizard(mode) {
+  if (!SELECTED_ROW) { toast('No row selected', 'เลือก row ก่อน', 'warn', 2500); return; }
+
+  const cr = await fetch(`/api/reannotate/context?row=${SELECTED_ROW}`);
   const cx = await cr.json();
-  if (!cx.ok) { alert('โหลด context ไม่ได้: ' + cx.error); return; }
-
-  // If row didn't have a pdf_rel but we got candidates, let user pick
-  let chosen_pdf_rel = cx.pdf_rel;
-  if (cx.candidates && cx.candidates.length > 1 && (!ROWS_BY_NUM[SELECTED_ROW] || !ROWS_BY_NUM[SELECTED_ROW].pdf_rel)) {
-    const lines = cx.candidates.map((c, i) => `${i+1}. [${c.folder}] ${c.name}`).join('\n');
-    const ans = prompt(
-      `Row นี้เป็น "ยินดีปฏิบัติ" และไม่มี PDF อ้างอิง — เลือก catalog ที่จะ annotate:\n\n${lines}\n\nพิมพ์เลข 1-${cx.candidates.length}:`,
-      '1');
-    if (!ans) return;
-    const idx = parseInt(ans) - 1;
-    if (idx < 0 || idx >= cx.candidates.length) { alert('เลขไม่ถูกต้อง'); return; }
-    chosen_pdf_rel = cx.candidates[idx].rel;
-  }
-  if (!chosen_pdf_rel) {
-    alert('ไม่มี catalog PDF สำหรับ row นี้');
+  if (!cx.ok) {
+    toast('Wizard error', 'โหลด context ไม่ได้: ' + (cx.error || ''), 'error', 4000);
     return;
   }
 
-  MANUAL_MODE = true;
-  MANUAL_TARGET_ROW = SELECTED_ROW;
-  MANUAL_SUGGESTED_LABEL = cx.suggested_label || '';
-  MANUAL_SQUARE_ID = null;
-  MANUAL_LABEL_ID = null;
+  // Pick PDF — prefer the row's current; otherwise first candidate
+  let chosen_pdf_rel = cx.pdf_rel;
+  if (!chosen_pdf_rel && cx.candidates && cx.candidates.length) {
+    chosen_pdf_rel = cx.candidates[0].rel;
+  }
+  if (!chosen_pdf_rel) {
+    toast('No catalog PDF', 'ไม่มี catalog PDF สำหรับ row นี้ — ลอง section อื่น', 'warn', 4000);
+    return;
+  }
 
-  // If chosen PDF differs from current, load it
+  WIZ = _newWizState();
+  WIZ.mode = mode;
+  WIZ.row = cx.row;
+  WIZ.pdf_rel = chosen_pdf_rel;
+  WIZ.candidates = cx.candidates || [];
+  WIZ.steps = cx.steps || [{label: '', hint: 'ลาก rect รอบเนื้อหา', kind: 'row'}];
+  WIZ.delete_existing = (mode === 'reannotate');
+  WIZ.delete_prefixes = cx.delete_label_prefixes || [];
+  WIZ.brand_hint = cx.brand_hint || '';
+  WIZ.model_hint = cx.model_hint || '';
+  WIZ.section = cx.section || '';
+  WIZ.col_b = cx.col_b || '';
+  WIZ.current_step = 0;
+
+  MANUAL_MODE = true;
+  MANUAL_TARGET_ROW = cx.row;
+
+  // Load chosen PDF if it differs from currently displayed
   if (!CURRENT_PDF || CURRENT_PDF.rel !== chosen_pdf_rel) {
     await loadPdf(chosen_pdf_rel, 1, null);
   }
+  WIZ.pdf_meta = CURRENT_PDF && CURRENT_PDF.meta;
 
-  const banner = document.getElementById('manual-banner');
-  document.getElementById('manual-target-info').innerHTML =
-    `🎯 กำลัง mark <strong>R${cx.row}</strong> · section <code>${escapeHtml(cx.section || '')}</code>` +
-    ` · label: <code>${escapeHtml(cx.suggested_label)}</code>` +
-    `<br><span style="font-size:11px">👉 ลากกรอบรอบเนื้อหาใน catalog → ระบบจะแปะ label และอัพเดต Col D อัตโนมัติ ` +
-    `(B: <em>${escapeHtml((cx.col_b||'').slice(0,80).trim())}</em>)</span>`;
-  banner.classList.add('show');
-  document.getElementById('manual-save-btn').disabled = true;
+  // Show banner and render initial state
+  document.getElementById('manual-banner').classList.add('show');
+  _renderWizBanner();
 
   if (!EDIT_MODE) toggleEditMode();
   setTool('drawRect');
 }
 
+// Render banner UI for the current wizard step ────────────────
+function _renderWizBanner() {
+  if (!WIZ) return;
+  const totalSteps = WIZ.steps.length;
+  const i = WIZ.current_step;
+  const active = WIZ.steps[Math.min(i, totalSteps - 1)] || {};
+  const isDone = i >= totalSteps;
+
+  // Stepper chips
+  const prog = document.getElementById('wiz-progress');
+  const chips = WIZ.steps.map((st, idx) => {
+    let cls = 'step';
+    if (idx < i) cls += ' done';
+    else if (idx === i && !isDone) cls += ' active';
+    const mark = idx < i
+      ? `<span class="check">${ico('check',10)}</span>`
+      : `<span class="num">${idx+1}</span>`;
+    return `<span class="${cls}">${mark} ${escapeHtml(st.label || '·')}</span>`;
+  }).join(`<span class="arrow">${ico('chevron-right',10)}</span>`);
+  prog.innerHTML = chips;
+
+  // Target info / hint
+  const ti = document.getElementById('manual-target-info');
+  const headIcon = WIZ.mode === 'reannotate' ? ico('refresh',14) : ico('pin',14);
+  const headLabel = WIZ.mode === 'reannotate' ? 'Re-annotate' : 'Mark';
+  const head = `${headIcon} <strong>${headLabel} R${WIZ.row}</strong> · section <code>${escapeHtml(WIZ.section)}</code>`;
+  let body;
+  if (isDone) {
+    body = `<span style="font-size:var(--t-sm);color:var(--c-success-text)">${ico('check',12)} ครบทุก step — กด <strong>Save</strong> เพื่อบันทึก</span>`;
+  } else {
+    body = `<span style="font-size:var(--t-sm)">Step ${i+1}/${totalSteps} · label: <code>${escapeHtml(active.label||'')}</code> — ${active.hint||''}</span>`;
+  }
+  ti.innerHTML = head + '<br>' + body;
+
+  // PDF picker label
+  const pdfLabel = document.getElementById('wiz-pdf-current');
+  if (pdfLabel) {
+    const cur = (WIZ.candidates.find(c => c.rel === WIZ.pdf_rel) || {}).name
+                 || (WIZ.pdf_rel||'').split('/').pop() || WIZ.pdf_rel;
+    pdfLabel.textContent = cur;
+    pdfLabel.title = WIZ.pdf_rel;
+  }
+
+  // Buttons
+  document.getElementById('wiz-back-btn').disabled = (WIZ.drawn.length === 0);
+  document.getElementById('manual-save-btn').disabled = !isDone;
+}
+
+// Cancel / back / save ────────────────────────────────────────
 function cancelManualAnnotate() {
   if (MANUAL_MODE && DIRTY) {
     if (!confirm('ยกเลิกการ annotate? การเปลี่ยนแปลงที่ยังไม่ save จะหาย')) return;
   }
   MANUAL_MODE = false;
   MANUAL_TARGET_ROW = null;
-  MANUAL_SUGGESTED_LABEL = '';
+  WIZ = null;
+  closeWizPdfPicker();
   document.getElementById('manual-banner').classList.remove('show');
-  // Drop unsaved changes — easiest way is to exit edit mode (which prompts)
   if (EDIT_MODE) {
-    if (DIRTY) UNDO_STACK = [];  // clear dirty pending changes
+    if (DIRTY) UNDO_STACK = [];
     setDirty(false);
     EDIT_ANNOTS = [];
     SELECTED_ANN_ID = null;
@@ -7701,80 +9283,249 @@ function cancelManualAnnotate() {
   }
 }
 
-// Hook into addRectAt: when in MANUAL_MODE and the user creates the FIRST
-// Square, auto-add a paired FreeText label with the suggested content.
+function wizBack() {
+  if (!WIZ || WIZ.drawn.length === 0) return;
+  // Pop the last drawn pair, remove its annots from EDIT_ANNOTS
+  const last = WIZ.drawn.pop();
+  EDIT_ANNOTS = EDIT_ANNOTS.filter(a => a._id !== last.square_id && a._id !== last.label_id);
+  SELECTED_ANN_ID = null;
+  WIZ.current_step = WIZ.drawn.length;
+  setDirty(EDIT_ANNOTS.some(a => a._isNew));
+  refreshOverlay();
+  setTool('drawRect');
+  _renderWizBanner();
+}
+
+async function saveManualAnnotate() {
+  if (!WIZ || !MANUAL_TARGET_ROW) return;
+  if (WIZ.drawn.length < WIZ.steps.length) {
+    toast('Wizard incomplete', `ต้องวาด ${WIZ.steps.length} rect ก่อน — ตอนนี้วาดแล้ว ${WIZ.drawn.length}`, 'warn', 3000);
+    return;
+  }
+
+  const btn = document.getElementById('manual-save-btn');
+  btn.disabled = true;
+  const origLabel = btn.textContent;
+  btn.textContent = 'Saving…';
+  try {
+    let url, payload;
+    // Read latest rects from EDIT_ANNOTS (they may have been moved/resized)
+    const stepsPayload = WIZ.drawn.map(d => {
+      const sq = EDIT_ANNOTS.find(a => a._id === d.square_id);
+      const lb = EDIT_ANNOTS.find(a => a._id === d.label_id);
+      return {
+        content_rect: sq ? sq.rect : d.content_rect,
+        label_rect:   lb ? lb.rect : d.label_rect,
+        label_text:   lb ? (lb.contents || '') : (d.label_text || ''),
+      };
+    });
+
+    if (WIZ.mode === 'reannotate' || WIZ.steps.length > 1 || WIZ.delete_existing) {
+      url = '/api/reannotate/save';
+      payload = {
+        row: WIZ.row,
+        pdf_rel: CURRENT_PDF.rel,
+        page: PDF_PAGE,                 // all current steps share the visible page
+        steps: stepsPayload,
+        delete_existing: !!WIZ.delete_existing,
+        delete_prefixes: WIZ.delete_prefixes || [],
+        // brand/model hints flow into Col D for section_header brand_model rows
+        brand: WIZ.brand_hint,
+        model: WIZ.model_hint,
+      };
+    } else {
+      // Single-step manual flow keeps the legacy endpoint for back-compat
+      url = '/api/manual_annotate/save';
+      const s = stepsPayload[0];
+      payload = {
+        row: WIZ.row,
+        page: PDF_PAGE,
+        content_rect: s.content_rect,
+        label_rect: s.label_rect,
+        label_text: s.label_text,
+        pdf_rel: CURRENT_PDF.rel,
+      };
+    }
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      toast('Save failed', j.error || JSON.stringify(j), 'error', 6000);
+      btn.disabled = false; btn.textContent = origLabel;
+      return;
+    }
+    toast(`✓ R${WIZ.row} saved`,
+          `Col D → ${(j.new_d||'').slice(0, 80)}${(j.new_d||'').length > 80 ? '…' : ''}`,
+          'learn', 5000);
+    if (typeof tickRetrain === 'function') tickRetrain('reannotate');
+    MANUAL_MODE = false;
+    WIZ = null;
+    document.getElementById('manual-banner').classList.remove('show');
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    toast('Save error', e.message, 'error', 5000);
+    btn.disabled = false; btn.textContent = origLabel;
+  }
+}
+
+// Drawing hook ─────────────────────────────────────────────────
+// When wizard is active, each new Square the user draws becomes one
+// step. We auto-place a paired FreeText label and advance the cursor.
 const _origAddRectAt = addRectAt;
 addRectAt = function(x0, y0, x1, y1) {
   _origAddRectAt(x0, y0, x1, y1);
-  if (!MANUAL_MODE) return;
+  if (!MANUAL_MODE || !WIZ) return;
+  // If user already finished all steps but draws another rect, treat as
+  // free-form (don't auto-label).
+  if (WIZ.current_step >= WIZ.steps.length) {
+    _renderWizBanner();
+    return;
+  }
+
   const sq = EDIT_ANNOTS[EDIT_ANNOTS.length - 1];
   if (!sq) return;
-  MANUAL_SQUARE_ID = sq._id;
-  // Auto-place a label to the right of the square (fallback below)
-  const pageSize = CURRENT_PDF.meta.page_sizes[PDF_PAGE - 1] || [595, 842];
-  const labelW = Math.min(180, Math.max(80, MANUAL_SUGGESTED_LABEL.length * 6));
+  const stepDef = WIZ.steps[WIZ.current_step];
+  const labelText = stepDef.label || '';
+
+  // Auto-place a label rect — prefer right of the square, then below, then above
+  const pageSize = (CURRENT_PDF.meta && CURRENT_PDF.meta.page_sizes[PDF_PAGE - 1]) || [595, 842];
+  const labelW = Math.min(180, Math.max(60, labelText.length * 7 + 16));
   const labelH = 14;
   let lx0 = x1 + 5, ly0 = (y0 + y1) / 2 - labelH / 2;
   if (lx0 + labelW > pageSize[0] - 5) {
     // place below
     lx0 = x0; ly0 = y1 + 4;
+    if (ly0 + labelH > pageSize[1] - 5) {
+      // place above
+      lx0 = x0; ly0 = y0 - labelH - 4;
+    }
   }
-  const id = newClientId();
+  const lid = newClientId();
   const label = {
-    _id: id, _isNew: true, xref: null,
+    _id: lid, _isNew: true, xref: null,
     page: PDF_PAGE, type: 'FreeText',
     rect: [lx0, ly0, lx0 + labelW, ly0 + labelH],
-    contents: MANUAL_SUGGESTED_LABEL,
+    contents: labelText,
   };
   EDIT_ANNOTS.push(label);
-  MANUAL_LABEL_ID = id;
-  SELECTED_ANN_ID = id;  // select the label so user can drag it
+  WIZ.drawn.push({
+    square_id: sq._id, label_id: lid,
+    content_rect: sq.rect.slice(),
+    label_rect: label.rect.slice(),
+    label_text: labelText,
+  });
+  WIZ.current_step += 1;
+  SELECTED_ANN_ID = lid;
   setDirty(true);
   refreshOverlay();
-  // Enable Save & Update Col D
-  document.getElementById('manual-save-btn').disabled = false;
-  // Switch to Select tool so user can drag/edit the label
-  setTool('select');
+
+  // Decide next tool based on whether more steps remain
+  if (WIZ.current_step < WIZ.steps.length) {
+    // Stay in drawRect for the next step but flash a hint
+    setTool('drawRect');
+  } else {
+    setTool('select');
+  }
+  _renderWizBanner();
 };
 
-async function saveManualAnnotate() {
-  if (!MANUAL_MODE || !MANUAL_TARGET_ROW) return;
-  const sq = EDIT_ANNOTS.find(a => a._id === MANUAL_SQUARE_ID);
-  const lb = EDIT_ANNOTS.find(a => a._id === MANUAL_LABEL_ID);
-  if (!sq || !lb) {
-    alert('ต้องลาก rect ก่อน save');
-    return;
+// PDF picker dropdown ─────────────────────────────────────────
+let _WIZ_PDF_MENU = null;
+function toggleWizPdfPicker(e) {
+  if (e) e.stopPropagation();
+  if (_WIZ_PDF_MENU) { closeWizPdfPicker(); return; }
+  if (!WIZ) return;
+
+  const menu = document.createElement('div');
+  menu.className = 'wiz-pdf-menu';
+  let html = `<div class="menu-header">เปลี่ยน catalog · section ${escapeHtml(WIZ.section)}</div>`;
+  if (!WIZ.candidates.length) {
+    html += `<div style="padding:var(--s-5);color:var(--c-text-faint);text-align:center;">ไม่มี candidate</div>`;
+  } else {
+    html += WIZ.candidates.map(c => {
+      const cur = (c.rel === WIZ.pdf_rel);
+      return `<button class="pdf-opt ${cur?'is-current':''}" data-rel="${escapeHtml(c.rel)}">
+        <span class="pdf-name">${cur?'✓ ':''}${escapeHtml(c.name)}</span>
+        <span class="pdf-folder">${escapeHtml(c.folder)}</span>
+      </button>`;
+    }).join('');
   }
-  const btn = document.getElementById('manual-save-btn');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
-  try {
-    const r = await fetch('/api/manual_annotate/save', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        row: MANUAL_TARGET_ROW,
-        page: sq.page,
-        content_rect: sq.rect,
-        label_rect: lb.rect,
-        label_text: lb.contents,
-        pdf_rel: CURRENT_PDF.rel,
-      }),
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+  _WIZ_PDF_MENU = menu;
+
+  // Position below the trigger button
+  const btn = document.getElementById('wiz-pdf-btn');
+  const r = btn.getBoundingClientRect();
+  let x = r.left, y = r.bottom + 4;
+  const W = menu.offsetWidth, H = menu.offsetHeight;
+  if (x + W > window.innerWidth - 8) x = window.innerWidth - W - 8;
+  if (y + H > window.innerHeight - 8) y = r.top - H - 4;
+  menu.style.left = `${Math.max(8, x)}px`;
+  menu.style.top  = `${Math.max(8, y)}px`;
+
+  menu.querySelectorAll('button.pdf-opt').forEach(b => {
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const rel = b.dataset.rel;
+      closeWizPdfPicker();
+      await _wizSwitchPdf(rel);
     });
-    const j = await r.json();
-    if (!j.ok) {
-      alert('Save failed: ' + (j.error || JSON.stringify(j)));
-      btn.disabled = false; btn.textContent = '✓ Save & update Col D';
-      return;
-    }
-    alert(`✓ Saved\n\nOld Col D: ${j.old_d || '(empty)'}\n\nNew Col D: ${j.new_d}`);
-    MANUAL_MODE = false;
-    document.getElementById('manual-banner').classList.remove('show');
-    location.reload();
-  } catch (e) {
-    alert('Save error: ' + e.message);
-    btn.disabled = false; btn.textContent = '✓ Save & update Col D';
+  });
+  setTimeout(() => {
+    document.addEventListener('click', _onDocClickForWizPdfMenu, true);
+    document.addEventListener('keydown', _onEscForWizPdfMenu, true);
+  }, 0);
+}
+function closeWizPdfPicker() {
+  if (_WIZ_PDF_MENU) { _WIZ_PDF_MENU.remove(); _WIZ_PDF_MENU = null; }
+  document.removeEventListener('click', _onDocClickForWizPdfMenu, true);
+  document.removeEventListener('keydown', _onEscForWizPdfMenu, true);
+}
+function _onDocClickForWizPdfMenu(e) {
+  if (_WIZ_PDF_MENU && !_WIZ_PDF_MENU.contains(e.target) &&
+      e.target.id !== 'wiz-pdf-btn' && !e.target.closest('#wiz-pdf-btn')) {
+    closeWizPdfPicker();
   }
+}
+function _onEscForWizPdfMenu(e) {
+  if (e.key === 'Escape') { e.stopPropagation(); closeWizPdfPicker(); }
+}
+
+async function _wizSwitchPdf(rel) {
+  if (!WIZ || !rel || rel === WIZ.pdf_rel) return;
+  if (WIZ.drawn.length > 0) {
+    if (!confirm('เปลี่ยน PDF จะลบ rect ที่วาดไว้ในหน้านี้ — ต่อไหม?')) return;
+  }
+  // Drop in-progress drawings
+  for (const d of WIZ.drawn) {
+    EDIT_ANNOTS = EDIT_ANNOTS.filter(a => a._id !== d.square_id && a._id !== d.label_id);
+  }
+  WIZ.drawn = [];
+  WIZ.current_step = 0;
+  WIZ.pdf_rel = rel;
+  // Update brand/model hint from the new filename
+  const stem = rel.split('/').pop().replace(/\.pdf$/i, '');
+  // Use a quick parse mirroring parse_brand_model_from_filename (ASCII first token)
+  const stripped = stem.replace(/^\d+(?:\.\d+){1,3}\.?\s+/, '').replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+  const m = stripped.match(/[A-Za-z]{2,}\S*/);
+  if (m) {
+    WIZ.brand_hint = m[0][0].toUpperCase() + m[0].slice(1);
+    WIZ.model_hint = stripped.slice(stripped.indexOf(m[0]) + m[0].length).trim();
+  }
+  await loadPdf(rel, 1, null);
+  WIZ.pdf_meta = CURRENT_PDF && CURRENT_PDF.meta;
+  setTool('drawRect');
+  setDirty(false);
+  EDIT_ANNOTS = [];
+  SELECTED_ANN_ID = null;
+  refreshOverlay();
+  _renderWizBanner();
+  toast('PDF switched', rel.split('/').pop(), 'info', 2500);
 }
 
 // ── Toast notifications ───────────────────────────────────────
@@ -7785,7 +9536,7 @@ function toast(title, body, kind = 'info', timeout = 5000) {
   el.className = 'toast ' + kind;
   el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   el.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
-  el.innerHTML = `<span class="close" role="button" aria-label="ปิด" tabindex="0" onclick="this.parentElement.remove()">✕</span>` +
+  el.innerHTML = `<button class="close" type="button" aria-label="ปิด" onclick="this.parentElement.remove()">${ico('x',12)}</button>` +
                  `<div class="title">${escapeHtml(title)}</div>` +
                  (body ? `<div class="body">${escapeHtml(body)}</div>` : '');
   // Keep stack reasonable
@@ -7814,7 +9565,7 @@ function toggleTheme() {
   root.setAttribute('data-theme', next);
   try { localStorage.setItem('comply-theme', next); } catch (e) {}
   const btn = document.getElementById('theme-toggle');
-  if (btn) btn.textContent = next === 'dark' ? '☀' : '🌓';
+  if (btn) btn.innerHTML = ico(next === 'dark' ? 'sun' : 'moon', 16);
 }
 (function initTheme() {
   try {
@@ -7822,7 +9573,7 @@ function toggleTheme() {
     if (saved === 'dark' || saved === 'light') {
       document.documentElement.setAttribute('data-theme', saved);
       const btn = document.getElementById('theme-toggle');
-      if (btn) btn.textContent = saved === 'dark' ? '☀' : '🌓';
+      if (btn) btn.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#i-${saved === 'dark' ? 'sun' : 'moon'}"/></svg>`;
     }
   } catch (e) {}
 })();
@@ -8276,6 +10027,582 @@ setStatus = async function(status) {
   await _origSetStatus(status);
   if (AUTO_ADVANCE && status !== 'unverified') moveRow(1);
 };
+
+// ============================================================
+// Sprint UI-2 / UI-3 / S1 / S2 / S3 — JS additions
+// ============================================================
+
+// ── Partial refresh helper (Sprint S1.1 — kills location.reload) ──
+async function partialRefresh(opts = {}) {
+  // Re-fetch /api/index, rebuild ROWS_BY_NUM, refresh tree + xlsx + stats
+  // without losing scroll/expanded state.
+  try {
+    const j = await fetch('/api/index').then(r => r.json());
+    DATA = j;
+    ROWS_BY_NUM = Object.fromEntries(j.rows.map(r => [r.row, r]));
+    TREE_ROOT = j.tree;
+    buildRowBlobs();
+    applyFilters();
+    renderStats();
+    if (SELECTED_ROW) {
+      // Re-render xlsx + action bar for the still-selected row
+      const r = ROWS_BY_NUM[SELECTED_ROW];
+      if (r) {
+        loadXlsx(SELECTED_ROW);
+        renderActionBar(r);
+      }
+    }
+    if (opts.reloadPdf && CURRENT_PDF) {
+      // Force PDF re-fetch (annotations may have changed)
+      await loadPdf(CURRENT_PDF.rel, PDF_PAGE, CURRENT_HIGHLIGHT);
+    }
+  } catch (e) {
+    toast('Refresh failed', e.message, 'error', 4000);
+  }
+}
+
+// ── Toast with action button (Sprint S1.2 — Undo support) ──────
+function toastWithAction(title, body, actionLabel, actionFn, kind = 'info', timeout = 6000) {
+  const wrap = document.getElementById('toasts');
+  if (!wrap) return null;
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML =
+    `<button class="close" type="button" aria-label="ปิด" onclick="this.parentElement.remove()">${ico('x',12)}</button>` +
+    `<div class="title">${escapeHtml(title)}</div>` +
+    (body ? `<div class="body">${body}</div>` : '') +
+    `<button class="toast-action">${escapeHtml(actionLabel)}</button>`;
+  while (wrap.children.length >= 6) wrap.firstChild.remove();
+  wrap.appendChild(el);
+  el.querySelector('.toast-action').addEventListener('click', () => {
+    actionFn();
+    el.remove();
+  });
+  if (timeout) {
+    setTimeout(() => {
+      if (!el.parentElement) return;
+      el.classList.add('fading');
+      setTimeout(() => el.remove(), 400);
+    }, timeout);
+  }
+  return el;
+}
+
+// Diff toast (Sprint S2 — before/after)
+function toastDiff(title, oldStr, newStr, undoFn) {
+  const body =
+    `<span class="diff-old">${escapeHtml(oldStr || '(empty)')}</span>` +
+    `<span class="diff-new">${escapeHtml(newStr || '(empty)')}</span>`;
+  const wrap = document.getElementById('toasts');
+  if (!wrap) return;
+  const el = document.createElement('div');
+  el.className = 'toast diff learn';
+  el.setAttribute('role', 'status');
+  el.innerHTML =
+    `<button class="close" type="button" aria-label="ปิด" onclick="this.parentElement.remove()">${ico('x',12)}</button>` +
+    `<div class="title">${escapeHtml(title)}</div>` +
+    `<div class="body">${body}</div>` +
+    (undoFn ? `<button class="toast-action">Undo</button>` : '');
+  while (wrap.children.length >= 6) wrap.firstChild.remove();
+  wrap.appendChild(el);
+  if (undoFn) {
+    el.querySelector('.toast-action').addEventListener('click', () => {
+      undoFn();
+      el.remove();
+    });
+  }
+  setTimeout(() => {
+    if (!el.parentElement) return;
+    el.classList.add('fading');
+    setTimeout(() => el.remove(), 400);
+  }, 8000);
+}
+
+// ── setStatus undo support (Sprint S1.2) ───────────────────────
+let _LAST_STATUS_UNDO = null;
+const _origSetStatusForUndo = setStatus;
+setStatus = async function(status) {
+  if (!SELECTED_ROW) return;
+  const prev = (DATA.status && DATA.status[SELECTED_ROW]) ? DATA.status[SELECTED_ROW].status : 'unverified';
+  await _origSetStatusForUndo(status);
+  if (status !== 'unverified' && prev !== status) {
+    const rowToRevert = SELECTED_ROW;
+    toastWithAction(
+      `Marked ${labelFor(status)}`,
+      `<code>R${rowToRevert}</code>${prev !== 'unverified' ? ` (was ${labelFor(prev)})` : ''}`,
+      'Undo',
+      async () => {
+        SELECTED_ROW = rowToRevert;
+        await _origSetStatusForUndo(prev);
+      },
+      kindFor(status),
+      5000,
+    );
+  }
+};
+function labelFor(s) {
+  return ({pass: '✓ Pass', fail: '✗ Fail', need_fix: '⚠ Fix', skip: '⏭ Skip', unverified: 'unverified'})[s] || s;
+}
+function kindFor(s) {
+  return ({pass: 'info', fail: 'warn', need_fix: 'warn', skip: 'info'})[s] || 'info';
+}
+
+// ── Replace location.reload calls with partial refresh ─────────
+// (Sprint S1.1) — patch the wizard's saveManualAnnotate
+const _origSaveManualAnnotate = saveManualAnnotate;
+saveManualAnnotate = async function() {
+  if (!WIZ || !MANUAL_TARGET_ROW) return;
+  if (WIZ.drawn.length < WIZ.steps.length) {
+    toast('Wizard incomplete', `ต้องวาด ${WIZ.steps.length} rect ก่อน — ตอนนี้วาดแล้ว ${WIZ.drawn.length}`, 'warn', 3000);
+    return;
+  }
+  const btn = document.getElementById('manual-save-btn');
+  btn.disabled = true;
+  const origLabel = btn.innerHTML;
+  btn.innerHTML = `${ico('refresh',14)}<span>Saving…</span>`;
+  try {
+    const stepsPayload = WIZ.drawn.map(d => {
+      const sq = EDIT_ANNOTS.find(a => a._id === d.square_id);
+      const lb = EDIT_ANNOTS.find(a => a._id === d.label_id);
+      return {
+        content_rect: sq ? sq.rect : d.content_rect,
+        label_rect:   lb ? lb.rect : d.label_rect,
+        label_text:   lb ? (lb.contents || '') : (d.label_text || ''),
+      };
+    });
+    let url, payload;
+    if (WIZ.mode === 'reannotate' || WIZ.steps.length > 1 || WIZ.delete_existing) {
+      url = '/api/reannotate/save';
+      payload = {
+        row: WIZ.row,
+        pdf_rel: CURRENT_PDF.rel,
+        page: PDF_PAGE,
+        steps: stepsPayload,
+        delete_existing: !!WIZ.delete_existing,
+        delete_prefixes: WIZ.delete_prefixes || [],
+        brand: WIZ.brand_hint,
+        model: WIZ.model_hint,
+      };
+    } else {
+      url = '/api/manual_annotate/save';
+      const s = stepsPayload[0];
+      payload = {row: WIZ.row, page: PDF_PAGE, content_rect: s.content_rect, label_rect: s.label_rect, label_text: s.label_text, pdf_rel: CURRENT_PDF.rel};
+    }
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const j = await r.json();
+    if (!j.ok) {
+      toast('Save failed', j.error || JSON.stringify(j), 'error', 6000);
+      btn.disabled = false; btn.innerHTML = origLabel;
+      return;
+    }
+    // Surface PDF-edit errors (Sprint S1.2 — bug #4.1 fix)
+    if (j.pdf_result && j.pdf_result.errors > 0) {
+      toast(`PDF edits had ${j.pdf_result.errors} errors`,
+            `Applied: ${j.pdf_result.applied}, Errors: ${j.pdf_result.errors}. Check audit log.`,
+            'warn', 8000);
+    }
+    // Diff toast with Undo option
+    const oldD = j.old_d || '';
+    const newD = j.new_d || '';
+    toastDiff('Re-annotated · Col D updated', oldD, newD, oldD ? async () => {
+      await fetch('/api/row/col_d', {method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({row: WIZ.row, col_d: oldD, original: newD})});
+      await partialRefresh({reloadPdf: true});
+      toast('Reverted', `R${WIZ.row} · Col D restored`, 'info', 3000);
+    });
+    if (typeof tickRetrain === 'function') tickRetrain('reannotate');
+    MANUAL_MODE = false;
+    const wasReannotate = (WIZ.mode === 'reannotate');
+    const savedRow = WIZ.row;
+    const wasBM = WIZ.steps.length === 2 && WIZ.steps[0].kind === 'brand';
+    WIZ = null;
+    document.getElementById('manual-banner').classList.remove('show');
+    if (EDIT_MODE) toggleEditMode();
+    await partialRefresh({reloadPdf: true});
+    // Apply-to-siblings prompt for brand_model (Sprint S1.2)
+    if (wasBM && wasReannotate) {
+      offerApplyToSiblings(savedRow);
+    }
+  } catch (e) {
+    toast('Save error', e.message, 'error', 5000);
+    btn.disabled = false; btn.innerHTML = origLabel;
+  }
+};
+
+// ── Apply-to-siblings (Sprint S1.2) ────────────────────────────
+async function offerApplyToSiblings(savedRow) {
+  const r = ROWS_BY_NUM[savedRow];
+  if (!r) return;
+  const sec = r.section;
+  if (!sec) return;
+  // Find sibling rows: same section root (5.1.1), brand_model type, NOT yet
+  // matching the saved Col D shape
+  const sectionRoot = sec.split('.').slice(0, 2).join('.');
+  const siblings = (DATA.rows || []).filter(x => {
+    if (x.row === savedRow) return false;
+    if (!x.section) return false;
+    if (!x.section.startsWith(sectionRoot)) return false;
+    const t = (x.parsed && x.parsed.type) || '';
+    return t === 'brand_model' || x.role === 'section_header';
+  }).slice(0, 8);
+  if (siblings.length === 0) return;
+  toastWithAction(
+    `Apply same pattern to ${siblings.length} similar rows?`,
+    `<span style="font-size:var(--t-xs);color:var(--c-text-muted)">Sibling brand_model rows in section ${escapeHtml(sectionRoot)}.x</span>`,
+    'Review',
+    () => openBulkDialog(savedRow, siblings),
+    'learn', 8000,
+  );
+}
+
+function openBulkDialog(sourceRow, siblings) {
+  const m = document.getElementById('bulk-modal');
+  document.getElementById('bulk-info').innerHTML =
+    `Source: <code>R${sourceRow}</code> — applying brand_model pattern (filename-based) to siblings.`;
+  const list = document.getElementById('bulk-list');
+  list.innerHTML = siblings.map(r => {
+    const dPreview = (r.D || '').slice(0, 60);
+    return `<label class="version-item" style="cursor:pointer">
+      <input type="checkbox" class="bulk-row-cb" data-row="${r.row}" checked>
+      <div>
+        <div class="v-tag">R${r.row} · ${escapeHtml(r.section || '?')}</div>
+        <div class="v-meta">${escapeHtml(dPreview)}${(r.D||'').length > 60 ? '…' : ''}</div>
+      </div>
+      <div></div>
+    </label>`;
+  }).join('');
+  document.getElementById('bulk-summary').textContent =
+    `${siblings.length} rows queued · brand/model auto-derived from each row's catalog filename`;
+  m.classList.add('show');
+}
+function closeBulk() { document.getElementById('bulk-modal').classList.remove('show'); }
+async function applyBulk() {
+  const checked = [...document.querySelectorAll('.bulk-row-cb:checked')]
+    .map(cb => parseInt(cb.dataset.row));
+  if (!checked.length) { toast('Nothing selected', '', 'warn', 2500); closeBulk(); return; }
+  const btn = document.getElementById('bulk-apply');
+  btn.disabled = true;
+  btn.innerHTML = `${ico('refresh',14)} Applying…`;
+  let ok = 0, fail = 0;
+  for (const rn of checked) {
+    try {
+      const r = await fetch(`/api/auto_annotate/preview?row=${rn}`).then(r=>r.json());
+      if (!r.ok) { fail++; continue; }
+      const ap = await fetch('/api/auto_annotate/apply', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({row: rn, write_xlsx: true, write_pdf: true})});
+      const aj = await ap.json();
+      if (aj.ok) ok++; else fail++;
+    } catch (e) { fail++; }
+  }
+  closeBulk();
+  toast(`Bulk apply: ${ok} ok / ${fail} fail`, '', ok && !fail ? 'info' : 'warn', 5000);
+  await partialRefresh();
+}
+
+// ── Force-learn / Pin pattern (Sprint S2.1) ────────────────────
+async function pinAsTemplate(rowNum) {
+  try {
+    const r = await fetch('/api/learn/pin_pattern', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({row: rowNum})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('🧠 Pattern pinned', `Pattern จาก R${rowNum} จะถูกใช้เป็น template`, 'learn', 5000);
+    } else {
+      toast('Pin failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) {
+    toast('Pin failed', e.message, 'error', 4000);
+  }
+}
+
+// ── Command palette (Sprint UI-2.6) ────────────────────────────
+let _CMDK_OPEN = false;
+let _CMDK_RESULTS = [];
+let _CMDK_INDEX = 0;
+const CMDK_ACTIONS = [
+  {id:'showAuto',  label:'Auto-annotate row',          icon:'sparkles', shortcut:'A', kind:'action', fn: () => SELECTED_ROW && showAutoAnnotate()},
+  {id:'reann',     label:'Re-annotate row',            icon:'refresh',  shortcut:'R', kind:'action', fn: () => SELECTED_ROW && startReannotate()},
+  {id:'mark',      label:'Mark in catalog (manual)',   icon:'pin',      shortcut:'M', kind:'action', fn: () => SELECTED_ROW && startManualAnnotate()},
+  {id:'pin',       label:'Pin row as template',        icon:'sparkles', shortcut:'P', kind:'action', fn: () => SELECTED_ROW && pinAsTemplate(SELECTED_ROW)},
+  {id:'next-uncertain', label:'Next uncertain row',    icon:'arrow-right', shortcut:'N', kind:'action', fn: () => nextUncertainRow()},
+  {id:'pass',      label:'Mark as Pass',               icon:'check',    shortcut:'1', kind:'action', fn: () => SELECTED_ROW && setStatus('pass')},
+  {id:'fail',      label:'Mark as Fail',               icon:'x',        shortcut:'2', kind:'action', fn: () => SELECTED_ROW && setStatus('fail')},
+  {id:'fix',       label:'Mark as Need fix',           icon:'alert',    shortcut:'3', kind:'action', fn: () => SELECTED_ROW && setStatus('need_fix')},
+  {id:'skip',      label:'Mark as Skip',               icon:'skip',     shortcut:'4', kind:'action', fn: () => SELECTED_ROW && setStatus('skip')},
+  {id:'showLearning', label:'Open Learning panel',     icon:'brain',    kind:'action', fn: () => showLearning()},
+  {id:'showAudit',    label:'Open Database & Audit',   icon:'chart',    kind:'action', fn: () => showAudit()},
+  {id:'showVersions', label:'Open Project versions',   icon:'package',  kind:'action', fn: () => showVersions()},
+  {id:'showSettings', label:'Open Settings',           icon:'settings', kind:'action', fn: () => showSettings()},
+  {id:'snap',         label:'Quick snapshot',          icon:'camera',   kind:'action', fn: () => takeProjectSnap(false)},
+  {id:'theme',        label:'Toggle theme (light/dark)', icon:'moon',   kind:'action', fn: () => toggleTheme()},
+  {id:'help',         label:'Show keyboard shortcuts', icon:'help',     kind:'action', fn: () => showOnboarding(true)},
+];
+function openCmdK() {
+  document.getElementById('cmdk-bg').classList.add('show');
+  const inp = document.getElementById('cmdk-input');
+  inp.value = '';
+  setTimeout(() => inp.focus(), 30);
+  _CMDK_OPEN = true;
+  renderCmdK('');
+}
+function closeCmdK() {
+  document.getElementById('cmdk-bg').classList.remove('show');
+  _CMDK_OPEN = false;
+}
+function renderCmdK(q) {
+  const list = document.getElementById('cmdk-list');
+  q = (q || '').trim().toLowerCase();
+  const items = [];
+  // Actions filtered
+  for (const a of CMDK_ACTIONS) {
+    const score = q ? (a.label.toLowerCase().includes(q) ? 1 : (a.id.includes(q) ? 0.5 : 0)) : 1;
+    if (score > 0) items.push({...a, score});
+  }
+  // Row search (when q non-empty)
+  if (q && DATA && DATA.rows) {
+    const qNorm = (typeof normalizeForSearch === 'function') ? normalizeForSearch(q) : q;
+    let matched = 0;
+    for (const r of DATA.rows) {
+      if (matched >= 20) break;
+      const blob = ROW_BLOBS.get(r.row) || '';
+      if (!blob.includes(qNorm)) continue;
+      items.push({
+        id: 'row-' + r.row,
+        kind: 'row',
+        rowNum: r.row,
+        label: `R${r.row} · ${(r.section || '?')} · ${(r.B || '').toString().slice(0, 60).trim()}`,
+        meta: r.D ? r.D.slice(0, 40) : '',
+        icon: 'arrow-right',
+        score: 0.4,
+        fn: () => { closeCmdK(); selectRow(r.row); },
+      });
+      matched++;
+    }
+  }
+  items.sort((a, b) => b.score - a.score);
+  _CMDK_RESULTS = items;
+  _CMDK_INDEX = 0;
+  if (!items.length) {
+    list.innerHTML = '<div class="cmdk-empty">No results · ลองค้นชื่อ section หรือ keyword</div>';
+    return;
+  }
+  // Render with section labels
+  let html = '';
+  let lastKind = null;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.kind !== lastKind) {
+      html += `<div class="cmdk-section">${it.kind === 'row' ? 'Rows' : 'Actions'}</div>`;
+      lastKind = it.kind;
+    }
+    html += `<div class="cmdk-item${i === 0 ? ' cmdk-active' : ''}" data-i="${i}" role="option">
+      ${ico(it.icon || 'arrow-right',16)}
+      <div class="cmdk-item-main">${escapeHtml(it.label)}</div>
+      ${it.meta ? `<div class="cmdk-item-meta">${escapeHtml(it.meta)}</div>` : ''}
+      ${it.shortcut ? `<span class="cmdk-item-shortcut"><span class="kbd">${it.shortcut}</span></span>` : ''}
+    </div>`;
+  }
+  list.innerHTML = html;
+  list.querySelectorAll('.cmdk-item').forEach(el => {
+    el.addEventListener('mouseenter', () => { _setCmdKIndex(parseInt(el.dataset.i)); });
+    el.addEventListener('click', () => { _runCmdKItem(parseInt(el.dataset.i)); });
+  });
+}
+function _setCmdKIndex(i) {
+  _CMDK_INDEX = Math.max(0, Math.min(i, _CMDK_RESULTS.length - 1));
+  const els = document.querySelectorAll('.cmdk-item');
+  els.forEach((el, idx) => el.classList.toggle('cmdk-active', idx === _CMDK_INDEX));
+  const active = els[_CMDK_INDEX];
+  if (active) active.scrollIntoView({block: 'nearest'});
+}
+function _runCmdKItem(i) {
+  const it = _CMDK_RESULTS[i];
+  if (!it) return;
+  closeCmdK();
+  if (typeof it.fn === 'function') it.fn();
+}
+
+// ── Settings panel (Sprint UI-3.3) ─────────────────────────────
+function showSettings() {
+  const m = document.getElementById('settings-modal');
+  // Sync current values
+  const t = document.documentElement.getAttribute('data-theme') || '';
+  document.getElementById('settings-theme').value = t;
+  // LLM status
+  fetch('/api/learn/stats').then(r => r.json()).then(j => {
+    const llm = (j.llm && j.llm.name) || 'off';
+    const el = document.getElementById('settings-llm-status');
+    if (el) el.textContent = llm;
+  }).catch(() => {});
+  // Reduce motion
+  const rm = localStorage.getItem('comply-reduce-motion') === '1';
+  document.getElementById('settings-reduce-motion').checked = rm;
+  // Show kbd
+  const showKbd = localStorage.getItem('comply-show-kbd') !== '0';
+  document.getElementById('settings-show-kbd').checked = showKbd;
+  m.classList.add('show');
+}
+function closeSettings() { document.getElementById('settings-modal').classList.remove('show'); }
+function setThemeFromSettings(t) {
+  if (t) {
+    document.documentElement.setAttribute('data-theme', t);
+    try { localStorage.setItem('comply-theme', t); } catch (e) {}
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    try { localStorage.removeItem('comply-theme'); } catch (e) {}
+  }
+  // Update theme toggle icon
+  const btn = document.getElementById('theme-toggle');
+  const isDark = t === 'dark' || (t === '' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  if (btn) btn.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#i-${isDark ? 'sun' : 'moon'}"/></svg>`;
+}
+function setReduceMotion(on) {
+  document.documentElement.classList.toggle('reduce-motion', on);
+  try { localStorage.setItem('comply-reduce-motion', on ? '1' : '0'); } catch (e) {}
+}
+function setShowKbd(on) {
+  const el = document.querySelector('.kbd-help');
+  if (el) el.style.display = on ? '' : 'none';
+  try { localStorage.setItem('comply-show-kbd', on ? '1' : '0'); } catch (e) {}
+}
+
+// ── Onboarding (Sprint UI-3.1) ─────────────────────────────────
+function showOnboarding(force = false) {
+  if (!force && localStorage.getItem('comply-onboarded') === '1') return;
+  document.getElementById('onboard-bg').classList.add('show');
+}
+function closeOnboarding() { document.getElementById('onboard-bg').classList.remove('show'); }
+function dontShowOnboardingAgain() { try { localStorage.setItem('comply-onboarded','1'); } catch(e) {} }
+
+// ── Topbar Settings dropdown (Sprint UI-2.5) ───────────────────
+function toggleTopbarMenu(e) {
+  if (e) e.stopPropagation();
+  const m = document.getElementById('topbar-menu');
+  m.classList.toggle('show');
+  if (m.classList.contains('show')) {
+    setTimeout(() => document.addEventListener('click', _closeTopbarMenuOnDocClick), 0);
+  }
+}
+function closeTopbarMenu() {
+  document.getElementById('topbar-menu').classList.remove('show');
+  document.removeEventListener('click', _closeTopbarMenuOnDocClick);
+}
+function _closeTopbarMenuOnDocClick(e) {
+  if (!e.target.closest('.topbar-menu-btn')) closeTopbarMenu();
+}
+
+// ── Wizard skill.md tip (Sprint S3.6) ──────────────────────────
+const SKILL_TIPS = {
+  brand_model: 'Brand logo มัก<strong>หน้า 1 บนซ้าย/ขวา</strong>; model number มักในตาราง spec — label ชี้ <code>ยี่ห้อ</code>/<code>รุ่น</code> เท่านั้น',
+  item: 'Label ใช้รูป <code>{section} ข้อ N)</code> — rect ครอบเฉพาะข้อความข้อนั้น (ไม่รวม spec ข้างๆ)',
+  sub_item: 'Label ใช้รูป <code>{section} ข้อ N) ข้อย่อย M.</code> — rect เฉพาะข้อย่อยนั้น',
+  section: 'Section header rect ครอบ block ใหญ่ของ section นั้นใน catalog',
+};
+const _origRenderWizBanner = (typeof _renderWizBanner === 'function') ? _renderWizBanner : null;
+if (_origRenderWizBanner) {
+  _renderWizBanner = function() {
+    _origRenderWizBanner();
+    if (!WIZ) return;
+    const ti = document.getElementById('manual-target-info');
+    if (!ti) return;
+    const stepKind = WIZ.steps[Math.min(WIZ.current_step, WIZ.steps.length - 1)]?.kind;
+    let tipKey;
+    if (stepKind === 'brand' || stepKind === 'model') tipKey = 'brand_model';
+    else tipKey = stepKind || 'item';
+    const tip = SKILL_TIPS[tipKey];
+    if (tip && !ti.querySelector('.wiz-skill-tip')) {
+      ti.insertAdjacentHTML('beforeend',
+        `<div class="wiz-skill-tip">${ico('help',12)} <strong>SKILL.md tip:</strong> ${tip}</div>`);
+    }
+  };
+}
+
+// ── Counter animation (Sprint UI-2.4) ──────────────────────────
+const _origRenderStats = renderStats;
+let _LAST_PCT = null;
+renderStats = function() {
+  _origRenderStats();
+  const pillEl = document.getElementById('stats-pill-progress');
+  if (pillEl) {
+    const m = pillEl.textContent.match(/(\d+)%/);
+    if (m) {
+      const pct = parseInt(m[1]);
+      if (_LAST_PCT !== null && pct !== _LAST_PCT) {
+        const strong = pillEl.querySelector('strong');
+        if (strong) {
+          strong.classList.remove('pop');
+          // Force reflow then add class to retrigger animation
+          void strong.offsetWidth;
+          strong.classList.add('pop');
+        }
+      }
+      _LAST_PCT = pct;
+    }
+  }
+};
+
+// ── Global keyboard: Cmd+K, ?, Esc ─────────────────────────────
+document.addEventListener('keydown', (e) => {
+  // Cmd+K / Ctrl+K — open palette
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (_CMDK_OPEN) closeCmdK(); else openCmdK();
+    return;
+  }
+  // ? — open help/onboarding
+  if (e.key === '?' && !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) {
+    e.preventDefault();
+    showOnboarding(true);
+    return;
+  }
+  // Cmdk navigation
+  if (_CMDK_OPEN) {
+    if (e.key === 'Escape') { e.preventDefault(); closeCmdK(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); _setCmdKIndex(_CMDK_INDEX + 1); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); _setCmdKIndex(_CMDK_INDEX - 1); return; }
+    if (e.key === 'Enter')     { e.preventDefault(); _runCmdKItem(_CMDK_INDEX); return; }
+  }
+}, true);
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'cmdk-input') {
+    renderCmdK(e.target.value);
+  }
+}, true);
+
+// ── Init: show onboarding on first launch ──────────────────────
+setTimeout(() => {
+  if (localStorage.getItem('comply-onboarded') !== '1') {
+    showOnboarding(false);
+  }
+}, 600);
+// Restore reduce-motion + show-kbd preferences
+if (localStorage.getItem('comply-reduce-motion') === '1') {
+  document.documentElement.classList.add('reduce-motion');
+}
+if (localStorage.getItem('comply-show-kbd') === '0') {
+  const el = document.querySelector('.kbd-help');
+  if (el) el.style.display = 'none';
+}
+
+// ── Mobile: ensure topbar still has access via hamburger (UI-3.4) ──
+// At <700px the topbar is hidden; mobile-tabs has 3 tabs already.
+// Add a 4th tab "More" that toggles a drawer of Settings/Audit/Versions.
+(function injectMobileMore() {
+  const tabs = document.querySelector('.mobile-tabs');
+  if (!tabs) return;
+  if (tabs.querySelector('[data-tab="more"]')) return;
+  const moreBtn = document.createElement('button');
+  moreBtn.dataset.tab = 'more';
+  moreBtn.setAttribute('role', 'tab');
+  moreBtn.setAttribute('aria-selected', 'false');
+  moreBtn.innerHTML = `${ico('settings',14)}<span>More</span>`;
+  moreBtn.onclick = () => toggleTopbarMenu();
+  tabs.appendChild(moreBtn);
+})();
 
 init();
 </script>
