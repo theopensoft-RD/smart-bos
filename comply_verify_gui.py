@@ -10206,12 +10206,14 @@ saveManualAnnotate = async function() {
     // Diff toast with Undo option
     const oldD = j.old_d || '';
     const newD = j.new_d || '';
-    toastDiff('Re-annotated · Col D updated', oldD, newD, oldD ? async () => {
+    const undoRow = WIZ.row;
+    const undoFn = oldD ? async () => {
       await fetch('/api/row/col_d', {method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({row: WIZ.row, col_d: oldD, original: newD})});
+        body: JSON.stringify({row: undoRow, col_d: oldD, original: newD})});
       await partialRefresh({reloadPdf: true});
-      toast('Reverted', `R${WIZ.row} · Col D restored`, 'info', 3000);
-    });
+      toast('Reverted', `R${undoRow} · Col D restored`, 'info', 3000);
+    } : null;
+    toastDiff('Re-annotated · Col D updated', oldD, newD, undoFn);
     if (typeof tickRetrain === 'function') tickRetrain('reannotate');
     MANUAL_MODE = false;
     const wasReannotate = (WIZ.mode === 'reannotate');
