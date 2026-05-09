@@ -5172,16 +5172,21 @@ select { cursor: pointer; }
 .xlsx-table tr.target .row-num { color: var(--c-text); font-weight: 700; }
 .xlsx-table tr.target:hover td { background: #fde68a !important; }
 
+/* Col D — right-click opens menu, double-click edits inline.
+   Subtle right-edge hint stripe so users know it's interactive. */
 .xlsx-table td.col-D.editable {
-  cursor: pointer; position: relative; padding-right: 22px !important;
+  cursor: context-menu; position: relative;
 }
-.xlsx-table td.col-D.editable:hover { background: var(--c-purple-soft); }
-.xlsx-table td.col-D.editable:hover .d-caret { opacity: 1; transform: translateY(-50%); }
-.xlsx-table td.col-D.editable .d-caret {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%) translateX(2px);
-  font-size: var(--t-xs); color: var(--c-text-faint); opacity: 0.5;
-  transition: opacity var(--d-fast) var(--ease-std), transform var(--d-fast) var(--ease-out);
+.xlsx-table td.col-D.editable::after {
+  content: ''; position: absolute;
+  right: 0; top: 4px; bottom: 4px; width: 2px;
+  background: var(--c-purple);
+  opacity: 0;
+  border-radius: 2px;
+  transition: opacity var(--d-fast) var(--ease-std);
 }
+.xlsx-table td.col-D.editable:hover { background: var(--c-surface-2); }
+.xlsx-table td.col-D.editable:hover::after { opacity: 0.4; }
 .xlsx-table td.col-D.commitment .d-text { color: var(--c-text-soft); font-style: italic; }
 .xlsx-table td.col-D.commitment::before {
   content: '⚠ '; color: var(--c-warn); font-style: normal;
@@ -5191,7 +5196,7 @@ select { cursor: pointer; }
   outline: 2px solid var(--c-purple);
   outline-offset: -2px;
 }
-.xlsx-table td.col-D.editing .d-caret { display: none; }
+.xlsx-table td.col-D.editing::after { display: none; }
 
 /* Vendor tags */
 .vendor-tag {
@@ -5560,19 +5565,33 @@ select { cursor: pointer; }
 .manual-mode-banner button.cancel:hover { background: var(--c-danger-soft); }
 
 /* ── Docked bottom action bar (no longer floating) ──────────────── */
+/* Always occupies the grid 'action' row even when no row is selected,
+   so panes don't reflow when a row gets picked. Inner content fades
+   in/out via .ab-content visibility, never the bar itself. */
 .action-bar {
-  position: relative;            /* placed in grid via grid-area: action */
+  position: relative;
   background: var(--c-surface);
   border-top: 1px solid var(--c-border);
   padding: var(--s-4) var(--s-7);
   z-index: 60;
   box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.06);
-  animation: ab-rise var(--d-slow) var(--ease-out);
   width: 100%;
+  min-height: var(--action-bar-h);
+  display: flex; flex-direction: column;
+  justify-content: center;
 }
-@keyframes ab-rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+.action-bar.is-empty .ab-top,
+.action-bar.is-empty .ab-bottom { visibility: hidden; }
+.action-bar .ab-empty-msg {
+  display: none;
+  color: var(--c-text-faint);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+.action-bar.is-empty .ab-empty-msg {
+  display: block;
+  position: absolute; left: 0; right: 0; top: 50%;
+  transform: translateY(-50%);
 }
 .ab-top { display: flex; gap: var(--s-6); align-items: center; flex-wrap: wrap; }
 .ab-row-info {
@@ -7211,8 +7230,9 @@ select { cursor: pointer; }
   </div>
 </div>
 
-<!-- Floating action bar -->
-<div class="action-bar bottom-sheet" id="action-bar" style="display:none;" role="toolbar" aria-label="row verdict">
+<!-- Docked action bar — always visible, content swaps based on selection -->
+<div class="action-bar is-empty" id="action-bar" role="toolbar" aria-label="row verdict">
+  <div class="ab-empty-msg">เลือก row เพื่อตัดสิน verdict</div>
   <div class="ab-top">
     <div class="ab-row-info" id="ab-row-info">—</div>
     <div class="ab-flags" id="ab-flags"></div>
@@ -7636,7 +7656,10 @@ function expandPathToRow(rowNum) {
 
 // ── Action bar ─────────────────────────────────────────────────
 function renderActionBar(r) {
-  document.getElementById('action-bar').style.display = '';
+  // Toggle is-empty class (no display flip → no animation re-trigger,
+  // bar stays in the same grid slot regardless of selection state).
+  const bar = document.getElementById('action-bar');
+  bar.classList.remove('is-empty');
   const cur = (DATA.status && DATA.status[r.row]) || {};
   const st = cur.status || 'unverified';
 
@@ -7838,14 +7861,16 @@ async function loadXlsx(rowNum) {
     html += `<td class="col-A">${escapeHtml(row.A||'')}</td>`;
     html += `<td class="col-B">${escapeHtml(row.B||'')}</td>`;
     html += `<td class="col-C">${escapeHtml(row.C||'')}</td>`;
-    // Col D — single-click for dropdown (annotate / revert / edit / auto),
-    // double-click for inline editing
+    // Col D — RIGHT-click opens the actions menu (annotate / revert / edit / auto);
+    // double-click triggers inline editing; left-click selects the row (default).
     const dVal = row.D || '';
     const dCommit = dVal.trim().startsWith('ยินดีปฏิบัติ');
     const dCls = 'col-D editable' + (dCommit ? ' commitment' : ' has-ref');
-    html += `<td class="${dCls}" onclick="onColDClick(event, ${row.row})" ondblclick="editColD(event, ${row.row})" title="คลิกเพื่อเปิดเมนู / ดับเบิลคลิกเพื่อแก้">`;
+    html += `<td class="${dCls}"
+             oncontextmenu="onColDContextMenu(event, ${row.row})"
+             ondblclick="editColD(event, ${row.row})"
+             title="คลิกขวา → เปิดเมนู · ดับเบิลคลิก → แก้ไขในช่อง">`;
     html += `<span class="d-text">${escapeHtml(dVal)}</span>`;
-    html += `<span class="d-caret" aria-hidden="true">▾</span>`;
     html += `</td>`;
     html += `<td class="col-E">${row.E ? `<span class="vendor-tag ${row.E}">${escapeHtml(row.E)}</span>` : ''}</td>`;
     html += `<td class="col-F">${escapeHtml(row.F||'')}</td>`;
@@ -7924,12 +7949,13 @@ function editColD(e, rowNum) {
 }
 
 // ── Col D context dropdown menu ───────────────────────────────
-// Single-click on a Col D cell shows a dropdown of actions tailored to
-// the row's current state:
-//   • commitment ("ยินดีปฏิบัติ") → Mark / Auto / Edit
-//   • has reference  → Revert / Re-mark / Re-auto / Edit
+// Right-click (contextmenu) on a Col D cell shows a dropdown of actions
+// tailored to the row's current state:
+//   • commitment ("ยินดีปฏิบัติ") → Mark / Auto / Re-annotate / Edit
+//   • has reference                → Re-annotate / Auto / Mark / Edit / Revert
 //
-// The double-click handler (editColD) still runs for power users.
+// Left-click selects the row (same as clicking elsewhere on the row).
+// Double-click still triggers inline editing (editColD) for power users.
 
 let _COL_D_MENU = null;
 
@@ -7946,12 +7972,16 @@ function _onEscForColDMenu(e) {
   if (e.key === 'Escape') closeColDMenu();
 }
 
-function onColDClick(e, rowNum) {
-  e.stopPropagation();   // don't double-trigger row select
+function onColDContextMenu(e, rowNum) {
+  // Right-click: suppress browser context menu, show our actions menu.
+  e.preventDefault();
+  e.stopPropagation();
   if (e.target.closest('td').classList.contains('editing')) return;  // inline-edit mode, skip
   selectRow(rowNum);     // make sure the row context is loaded
   showColDMenu(e, rowNum);
 }
+// Back-compat: old call-sites still wired to onColDClick
+function onColDClick(e, rowNum) { return onColDContextMenu(e, rowNum); }
 
 function showColDMenu(e, rowNum) {
   closeColDMenu();
