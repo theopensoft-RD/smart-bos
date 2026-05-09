@@ -4406,12 +4406,14 @@ INDEX_HTML = r"""<!doctype html>
   /* Layout */
   --topbar-h:    52px;
   --pane-head-h: 40px;
+  --toolbar-h:   40px;            /* unified canvas/edit toolbar height */
+  --action-bar-h: 64px;            /* docked bottom action bar height */
   --tree-w:      320px;
   --tree-w-md:   280px;
-  --action-bar-w: 760px;
   --tree-row-h:  32px;
   --btn-h:       32px;
   --btn-h-sm:    28px;
+  --btn-h-toolbar: 28px;
 
   color-scheme: light;
 }
@@ -4613,14 +4615,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 /* ── App shell ──────────────────────────────────────────────────── */
 #app {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-rows: var(--topbar-h) 1fr auto;
   grid-template-columns: minmax(var(--tree-w-md), var(--tree-w)) 1fr 1fr;
   grid-template-areas:
     "topbar topbar topbar"
-    "tree   center pdf";
+    "tree   center pdf"
+    "action action action";
   height: 100vh;
   background: var(--c-bg);
 }
+#app > .action-bar { grid-area: action; }
 #app.has-sync-banner { padding-top: 32px; }
 
 .topbar {
@@ -4656,6 +4660,50 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .topbar-actions .stats-pill strong { color: var(--c-text); font-weight: 700; }
 .topbar-actions .stats-pill .sep { color: var(--c-text-faint); margin: 0 2px; }
+
+/* Topbar — current row context chip (breadcrumb-style) */
+.topbar-context {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  height: var(--btn-h);
+  padding: 0 var(--s-5);
+  margin-left: var(--s-5);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  color: var(--c-text);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: all var(--d-fast) var(--ease-std);
+  max-width: 380px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.topbar-context:hover {
+  background: var(--c-surface);
+  border-color: var(--c-border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--e-1);
+}
+.topbar-context-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.topbar-context-label .row-num {
+  font-family: var(--f-mono); font-weight: 700;
+  background: var(--c-primary-soft); color: var(--c-primary-text);
+  padding: 1px 6px; border-radius: var(--r-sm);
+  margin-right: var(--s-3);
+}
+.topbar-context-label .sep {
+  color: var(--c-text-faint); margin: 0 var(--s-2);
+}
+.topbar-context-label .ctx-section {
+  color: var(--c-text-muted); font-weight: 500;
+}
+.topbar-context-label .ctx-meta {
+  color: var(--c-text-soft);
+  font-style: italic;
+}
 
 /* Topbar buttons (icon + label, ghost-default) */
 .topbar-btn {
@@ -4749,32 +4797,87 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .btn.btn-danger { color: var(--c-danger-text); border-color: var(--c-danger); background: var(--c-surface); }
 .btn.btn-danger:hover { background: var(--c-danger-soft); }
 
-/* Toolbar buttons (compact) */
+/* ── Unified toolbar system ──────────────────────────────────────
+   Used by canvas-toolbar (TOR/PDF/xlsx) and edit-toolbar.
+   Visual rules:
+     • height: var(--toolbar-h)        (40px — consistent across panes)
+     • button: 28×28 icon-only OR 28×auto with label, padded
+     • groups: separated by .tb-sep    (1px vertical divider)
+     • info chips:  .info               (text in muted color)
+     • flex distribution: groups → spacer → groups
+*/
 .canvas-toolbar {
-  padding: var(--s-3) var(--s-7);
+  padding: 0 var(--s-6);
+  height: var(--toolbar-h);
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
-  display: flex; gap: var(--s-3); align-items: center;
-  font-size: var(--t-base); flex-wrap: wrap;
-  min-height: 36px;
+  display: flex; gap: var(--s-2); align-items: center;
+  font-size: var(--t-sm); flex-wrap: nowrap;
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-.canvas-toolbar button {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 26px; height: 26px;
+.canvas-toolbar::-webkit-scrollbar { display: none; }
+.canvas-toolbar button,
+.canvas-toolbar .tb-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
+  min-width: var(--btn-h-toolbar); height: var(--btn-h-toolbar);
   padding: 0 var(--s-4);
-  border: 1px solid var(--c-border);
-  background: var(--c-surface);
-  color: var(--c-text);
-  border-radius: var(--r-sm);
-  font-size: var(--t-sm);
-  transition: background var(--d-fast) var(--ease-std), border-color var(--d-fast) var(--ease-std);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--c-text-muted);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 500;
+  cursor: pointer;
+  transition: background var(--d-fast) var(--ease-std),
+              color var(--d-fast) var(--ease-std),
+              border-color var(--d-fast) var(--ease-std);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.canvas-toolbar button:hover { background: var(--c-surface-2); border-color: var(--c-border-strong); }
-.canvas-toolbar .info { color: var(--c-text-soft); font-size: var(--t-sm); }
+.canvas-toolbar button:hover,
+.canvas-toolbar .tb-btn:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+.canvas-toolbar button:active,
+.canvas-toolbar .tb-btn:active { transform: translateY(1px); }
+.canvas-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.canvas-toolbar .info {
+  color: var(--c-text-soft); font-size: var(--t-sm);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  flex-shrink: 0;
+}
 .canvas-toolbar label {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: var(--t-sm); color: var(--c-text-muted);
   cursor: pointer; user-select: none;
+  flex-shrink: 0;
+}
+/* Group + separator — visual chunking of related actions */
+.canvas-toolbar .tb-group {
+  display: inline-flex; gap: 2px; align-items: center;
+  flex-shrink: 0;
+}
+.canvas-toolbar .tb-sep {
+  width: 1px; height: 18px;
+  background: var(--c-border);
+  margin: 0 var(--s-3);
+  flex-shrink: 0;
+}
+.canvas-toolbar .tb-spacer { flex: 1; }
+/* Page indicator chip (e.g. "3 / 12") */
+.canvas-toolbar .page-ind {
+  display: inline-flex; align-items: center;
+  height: var(--btn-h-toolbar);
+  padding: 0 var(--s-4);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  font-family: var(--f-mono); font-size: var(--t-sm);
+  color: var(--c-text);
+  min-width: 64px; justify-content: center;
 }
 
 /* ── Inputs ─────────────────────────────────────────────────────── */
@@ -5142,47 +5245,35 @@ select { cursor: pointer; }
   box-shadow: var(--e-2);
 }
 
-/* Edit toolbar */
-.edit-toolbar {
-  padding: var(--s-3) var(--s-7);
-  background: linear-gradient(180deg, var(--c-warn-soft) 0%, transparent 200%);
+/* Edit toolbar — extends canvas-toolbar, adds amber accent */
+.edit-toolbar.canvas-toolbar {
+  background: linear-gradient(180deg, var(--c-warn-soft) 0%, var(--c-surface) 200%);
   border-bottom: 1px solid var(--c-warn);
-  display: flex; gap: var(--s-2);
-  align-items: center; flex-wrap: wrap;
-  min-height: 36px;
 }
-.edit-toolbar button {
-  display: inline-flex; align-items: center; justify-content: center;
-  font-size: var(--t-md); padding: 4px var(--s-4);
-  border: 1px solid var(--c-border-strong);
-  background: var(--c-surface);
-  color: var(--c-text);
-  border-radius: var(--r-md);
-  min-width: 30px; height: 28px;
-  transition: all var(--d-fast) var(--ease-std);
-}
-.edit-toolbar button:hover:not(:disabled) {
-  background: var(--c-surface-2); border-color: var(--c-warn);
-}
-.edit-toolbar button:disabled { opacity: 0.4; }
 .edit-toolbar button.tool.active {
   background: var(--c-warn); color: white; border-color: var(--c-warn);
   box-shadow: var(--e-1);
 }
-.edit-toolbar .sep {
-  width: 1px; background: var(--c-border-strong); height: 18px; margin: 0 var(--s-3);
+.edit-toolbar button.tool.active:hover {
+  background: var(--c-warn-hover); color: white;
 }
 .edit-toolbar .save-btn {
-  background: var(--c-success); color: white; border-color: var(--c-success);
+  background: var(--c-success); color: white !important; border-color: var(--c-success) !important;
   font-weight: 600;
+  padding: 0 var(--s-5) !important;
+}
+.edit-toolbar .save-btn:hover:not(:disabled) {
+  background: var(--c-success-hover); border-color: var(--c-success-hover);
 }
 .edit-toolbar .save-btn:disabled {
-  background: var(--c-border-strong); color: var(--c-text-soft);
-  border-color: var(--c-border-strong);
+  background: var(--c-border-strong) !important; color: var(--c-text-soft) !important;
+  border-color: var(--c-border-strong) !important;
 }
 .edit-toolbar .dirty-indicator {
   color: var(--c-warn-hover); font-size: var(--t-sm); font-weight: 600;
   padding: 0 var(--s-3);
+  display: inline-flex; align-items: center;
+  flex-shrink: 0;
 }
 
 /* PDF canvas wrapper for SVG overlay */
@@ -5437,22 +5528,20 @@ select { cursor: pointer; }
 }
 .manual-mode-banner button.cancel:hover { background: var(--c-danger-soft); }
 
-/* ── Floating action bar ────────────────────────────────────────── */
+/* ── Docked bottom action bar (no longer floating) ──────────────── */
 .action-bar {
-  position: fixed; bottom: var(--s-7); left: 50%; transform: translateX(-50%);
+  position: relative;            /* placed in grid via grid-area: action */
   background: var(--c-surface);
-  border-radius: var(--r-xl);
-  box-shadow: var(--e-4);
-  padding: var(--s-5) var(--s-7);
-  min-width: var(--action-bar-w); max-width: 92vw;
-  z-index: 100;
-  border: 1px solid var(--c-border);
-  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--c-border);
+  padding: var(--s-4) var(--s-7);
+  z-index: 60;
+  box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.06);
   animation: ab-rise var(--d-slow) var(--ease-out);
+  width: 100%;
 }
 @keyframes ab-rise {
-  from { opacity: 0; transform: translate(-50%, 12px); }
-  to   { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 .ab-top { display: flex; gap: var(--s-6); align-items: center; flex-wrap: wrap; }
 .ab-row-info {
@@ -6153,7 +6242,8 @@ select { cursor: pointer; }
     grid-template-columns: minmax(var(--tree-w-md), 280px) 1fr;
     grid-template-areas:
       "topbar topbar"
-      "tree   center";
+      "tree   center"
+      "action action";
   }
   .pdf-pane { display: none; }
   .pdf-pane.expand { display: flex; grid-column: 2; grid-area: center; }
@@ -6162,11 +6252,12 @@ select { cursor: pointer; }
 @media (max-width: 900px) {
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: var(--topbar-h) 240px 1fr;
+    grid-template-rows: var(--topbar-h) 240px 1fr auto;
     grid-template-areas:
       "topbar"
       "tree"
-      "center";
+      "center"
+      "action";
   }
   .tree-pane { border-right: none; border-bottom: 1px solid var(--c-border); }
 }
@@ -6176,21 +6267,16 @@ select { cursor: pointer; }
   .mobile-tabs { display: flex; }
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: 44px 1fr;
+    grid-template-rows: 44px 1fr auto;
     grid-template-areas:
       "topbar"
-      "tree";
+      "tree"
+      "action";
   }
   #app > .pane { display: none; grid-area: tree; }
   #app > .pane.mobile-active { display: flex; }
-  .action-bar {
-    min-width: auto; left: var(--s-4); right: var(--s-4);
-    transform: none; bottom: var(--s-4);
-    padding: var(--s-4) var(--s-5);
-    border-radius: var(--r-lg);
-  }
   .ab-top { flex-wrap: wrap; gap: var(--s-3); }
-  .ab-buttons { flex-wrap: wrap; }
+  .ab-secondary, .verdict-control { flex-wrap: wrap; }
   .ab-btn { padding: 5px var(--s-4); font-size: var(--t-sm); }
   .modal { min-width: auto !important; max-width: calc(100vw - 24px); padding: var(--s-6); }
   .audit-stats { grid-template-columns: repeat(2, 1fr) !important; }
@@ -6355,14 +6441,11 @@ select { cursor: pointer; }
   outline-offset: 2px !important;
 }
 
-/* Bottom-sheet action bar on mobile (Sprint UI-3.4) */
+/* Mobile (Sprint UI-3.4) — action-bar already docked, just enlarge tap targets */
 @media (max-width: 700px) {
-  .action-bar.bottom-sheet {
-    border-radius: var(--r-xl) var(--r-xl) 0 0;
-    bottom: 0; left: 0; right: 0; transform: none;
-    border-bottom: 0; border-left: 0; border-right: 0;
-    box-shadow: 0 -8px 24px rgba(0,0,0,0.18);
-    max-width: 100vw; min-width: 0;
+  .action-bar {
+    padding: var(--s-3) var(--s-4);
+    box-shadow: 0 -8px 24px rgba(0,0,0,0.12);
   }
   .ab-btn, .verdict-control .ab-btn {
     min-height: 44px;       /* Apple-HIG tap target */
@@ -6647,6 +6730,10 @@ select { cursor: pointer; }
       <span class="logo" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4z" fill="currentColor" stroke="none"/><path d="M3 12l9 4 9-4M3 17l9 4 9-4" opacity="0.5"/></svg></span>
       <span>Comply <span class="sub">Smart Plant 1</span></span>
     </div>
+    <!-- Current row context (clickable → focuses tree) -->
+    <button class="topbar-context" id="topbar-context" onclick="focusSelectedRow()" title="คลิกเพื่อโฟกัส row ปัจจุบันใน tree" style="display:none">
+      <span class="topbar-context-label" id="topbar-context-label"></span>
+    </button>
     <div class="topbar-spacer"></div>
     <div class="topbar-actions">
       <button class="topbar-btn" onclick="openCmdK()" title="Command palette (⌘K)" aria-label="open command palette"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><span class="kbd" style="margin-left:4px">⌘K</span></button>
@@ -6720,14 +6807,19 @@ select { cursor: pointer; }
         <span class="pane-title"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg><span>TOR</span> <span style="font-weight:400;color:var(--c-text-faint)" id="tor-info"></span></span>
       </h2>
       <div class="canvas-toolbar" role="toolbar" aria-label="TOR navigation">
-        <button onclick="torPrev()" title="หน้าก่อน" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
-        <span class="info" id="tor-page-info">— / —</span>
-        <button onclick="torNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+        <div class="tb-group">
+          <button onclick="torPrev()" title="หน้าก่อน (,)" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
+          <span class="page-ind" id="tor-page-info">— / —</span>
+          <button onclick="torNext()" title="หน้าถัดไป (.)" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+        </div>
+        <div class="tb-sep"></div>
+        <button onclick="torJumpToMatch()" title="ไปยังหน้าที่เจอ" aria-label="jump to match"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-target"/></svg><span>Match</span></button>
         <span class="info" id="tor-status">เลือก row เพื่อดู</span>
-        <span style="flex:1"></span>
-        <button onclick="torZoom(-1)" title="ย่อ" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
-        <button onclick="torZoom(1)" title="ขยาย" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
-        <button onclick="torJumpToMatch()" title="ไปยังหน้าที่เจอ" aria-label="jump to match"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-target"/></svg></button>
+        <span class="tb-spacer"></span>
+        <div class="tb-group">
+          <button onclick="torZoom(-1)" title="ย่อ" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
+          <button onclick="torZoom(1)" title="ขยาย" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
+        </div>
       </div>
       <div class="tor-canvas" id="tor-canvas">
         <div class="empty-state">
@@ -6746,10 +6838,12 @@ select { cursor: pointer; }
       </h2>
       <div class="canvas-toolbar" role="toolbar" aria-label="spreadsheet context">
         <span class="info">บริบท ±<span id="ctx-radius">6</span> rows</span>
-        <button onclick="ctxRadius(-2)" title="ลด context" aria-label="ลด context">−2</button>
-        <button onclick="ctxRadius(2)" title="เพิ่ม context" aria-label="เพิ่ม context">+2</button>
-        <span style="flex:1"></span>
-        <span class="info">คลิกแถวเพื่อ select</span>
+        <div class="tb-group">
+          <button onclick="ctxRadius(-2)" title="ลด context (−2 rows)" aria-label="ลด context">−2</button>
+          <button onclick="ctxRadius(2)" title="เพิ่ม context (+2 rows)" aria-label="เพิ่ม context">+2</button>
+        </div>
+        <span class="tb-spacer"></span>
+        <span class="info" style="font-style:italic">double-click Col D เพื่อแก้</span>
       </div>
       <div class="xlsx-wrap" id="xlsx-wrap">
         <div class="empty-state">
@@ -6769,29 +6863,38 @@ select { cursor: pointer; }
       <button class="edit-toggle-btn" id="edit-toggle-btn" onclick="toggleEditMode()" title="Edit annotations" aria-pressed="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-pencil"/></svg><span>Edit</span></button>
     </h2>
     <div class="canvas-toolbar" role="toolbar" aria-label="catalog navigation">
-      <button onclick="pdfPrev()" title="หน้าก่อน" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
-      <span class="info" id="pdf-page-info">— / —</span>
-      <button onclick="pdfNext()" title="หน้าถัดไป" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
-      <span style="flex:1"></span>
-      <button onclick="pdfZoom(-1)" title="ย่อ" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
-      <button onclick="pdfZoom(1)" title="ขยาย" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
-      <label><input type="checkbox" id="hl-toggle" checked onchange="renderPdf()"> highlight</label>
-      <button onclick="openInBrowser()" title="เปิดใน browser" aria-label="เปิดใน browser"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-external"/></svg></button>
+      <div class="tb-group">
+        <button onclick="pdfPrev()" title="หน้าก่อน ([)" aria-label="หน้าก่อน"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
+        <span class="page-ind" id="pdf-page-info">— / —</span>
+        <button onclick="pdfNext()" title="หน้าถัดไป (])" aria-label="หน้าถัดไป"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+      </div>
+      <span class="tb-spacer"></span>
+      <div class="tb-group">
+        <button onclick="pdfZoom(-1)" title="ย่อ (−)" aria-label="ย่อ"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
+        <button onclick="pdfZoom(1)" title="ขยาย (+)" aria-label="ขยาย"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="tb-sep"></div>
+      <label title="ไฮไลต์เนื้อหาที่ตรงกับ row"><input type="checkbox" id="hl-toggle" checked onchange="renderPdf()"> highlight</label>
+      <button onclick="openInBrowser()" title="เปิดใน browser tab ใหม่" aria-label="เปิดใน browser"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-external"/></svg></button>
     </div>
     <!-- Edit toolbar (visible only in edit mode) -->
-    <div class="edit-toolbar" id="edit-toolbar" style="display:none;">
-      <button class="tool active" data-tool="select" onclick="setTool('select')" title="Select / move (V)" aria-label="select tool"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-cursor"/></svg></button>
-      <button class="tool" data-tool="drawRect" onclick="setTool('drawRect')" title="Draw rectangle (R)" aria-label="draw rectangle"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-square"/></svg></button>
-      <button class="tool" data-tool="addText" onclick="setTool('addText')" title="Add text (T)" aria-label="add text"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-text"/></svg></button>
-      <button onclick="deleteSelected()" title="Delete selected (Del)" aria-label="delete"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg></button>
-      <span class="sep"></span>
-      <button onclick="undo()" id="undo-btn" disabled title="Undo (⌘Z)" aria-label="undo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-undo"/></svg></button>
-      <button onclick="redo()" id="redo-btn" disabled title="Redo (⇧⌘Z)" aria-label="redo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-redo"/></svg></button>
-      <span class="sep"></span>
-      <button onclick="showHistory()" title="Version history"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></button>
-      <span style="flex:1"></span>
+    <div class="edit-toolbar canvas-toolbar" id="edit-toolbar" style="display:none;">
+      <div class="tb-group" role="group" aria-label="tools">
+        <button class="tool active" data-tool="select" onclick="setTool('select')" title="Select / move · V" aria-label="select tool"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-cursor"/></svg></button>
+        <button class="tool" data-tool="drawRect" onclick="setTool('drawRect')" title="Draw rectangle · R" aria-label="draw rectangle"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-square"/></svg></button>
+        <button class="tool" data-tool="addText" onclick="setTool('addText')" title="Add text · T" aria-label="add text"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-text"/></svg></button>
+        <button onclick="deleteSelected()" title="Delete selected · Del" aria-label="delete"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div>
+      <div class="tb-sep"></div>
+      <div class="tb-group" role="group" aria-label="undo/redo">
+        <button onclick="undo()" id="undo-btn" disabled title="Undo · ⌘Z" aria-label="undo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-undo"/></svg></button>
+        <button onclick="redo()" id="redo-btn" disabled title="Redo · ⇧⌘Z" aria-label="redo"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-redo"/></svg></button>
+      </div>
+      <div class="tb-sep"></div>
+      <button onclick="showHistory()" title="Version history (per-PDF snapshots)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></button>
+      <span class="tb-spacer"></span>
       <span class="dirty-indicator" id="dirty-ind"></span>
-      <button onclick="saveEdits()" id="save-btn" class="save-btn" disabled title="Save (⌘S)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save</span></button>
+      <button onclick="saveEdits()" id="save-btn" class="save-btn" disabled title="Save · ⌘S"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save</span></button>
     </div>
     <!-- Re-annotate / Manual-annotate wizard banner -->
     <div class="manual-mode-banner" id="manual-banner" role="dialog" aria-label="annotate wizard">
@@ -7422,6 +7525,9 @@ async function selectRow(rowNum, scroll = true) {
   const r = ROWS_BY_NUM[rowNum];
   if (!r) return;
 
+  // 0) topbar context chip — show R# · section · brand/model summary
+  updateTopbarContext(r);
+
   // 1) action bar
   renderActionBar(r);
 
@@ -7452,6 +7558,32 @@ async function selectRow(rowNum, scroll = true) {
       if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     });
   }
+}
+
+// ── Topbar current-row context chip ───────────────────────────
+function updateTopbarContext(r) {
+  const chip = document.getElementById('topbar-context');
+  const lbl  = document.getElementById('topbar-context-label');
+  if (!chip || !lbl || !r) { if (chip) chip.style.display = 'none'; return; }
+  const sec = r.section || '?';
+  let meta = '';
+  if (r.parsed && r.parsed.brand && r.parsed.model) {
+    meta = `${r.parsed.brand} ${r.parsed.model}`;
+  } else if (r.parsed && r.parsed.brand) {
+    meta = r.parsed.brand;
+  } else if (r.B) {
+    meta = (r.B || '').toString().trim().replace(/\s+/g, ' ').slice(0, 50);
+  }
+  lbl.innerHTML =
+    `<span class="row-num">R${r.row}</span>` +
+    `<span class="ctx-section">${escapeHtml(sec)}</span>` +
+    (meta ? `<span class="sep">·</span><span class="ctx-meta">${escapeHtml(meta)}</span>` : '');
+  chip.style.display = '';
+}
+function focusSelectedRow() {
+  if (!SELECTED_ROW) return;
+  const el = document.querySelector(`.tree-row[data-row="${SELECTED_ROW}"]`);
+  if (el) el.scrollIntoView({block: 'center', behavior: 'smooth'});
 }
 
 /* Walk the tree, find any node containing the row, expand all ancestors. */
