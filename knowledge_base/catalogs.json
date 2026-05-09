@@ -1,0 +1,453 @@
+{
+  "_meta": {
+    "generated": "2026-05-09",
+    "total_catalogs": 35,
+    "schema": "Map of catalog_key → {file, vendor, brand, model, category, used_in, [pages, notes]}"
+  },
+  "catalogs": {
+    "G3N-61142": {
+      "file": "catalog/G3N-61142.pdf",
+      "vendor": "SMART",
+      "brand": "19\" GERMANY",
+      "model": "G3-61142",
+      "category": "Server Rack 42U",
+      "used_in": [
+        "5.1.1.1"
+      ],
+      "pages": 3,
+      "notes": "Used as parent rack catalog for 5.1.1.1 + 5.2.1.1"
+    },
+    "G7-00006": {
+      "file": "catalog/G7-00006.pdf",
+      "vendor": "SMART",
+      "brand": "19\" GERMANY",
+      "model": "G7-00006",
+      "category": "AC Power Distribution 6 outlets, 16A",
+      "used_in": [
+        "5.2.1.2.3",
+        "5.2.2.1.3",
+        "5.2.3.1.3",
+        "5.2.4.1.3"
+      ]
+    },
+    "G7-00012": {
+      "file": "catalog/G7-00012.pdf",
+      "vendor": "SMART",
+      "brand": "19\" GERMANY",
+      "model": "G7-00012",
+      "category": "AC Power Distribution 12 outlets, 16A",
+      "used_in": [
+        "5.1.1.1.3",
+        "5.2.1.1.3"
+      ]
+    },
+    "G7-05002": {
+      "file": "catalog/G7-05002.pdf",
+      "vendor": "SMART",
+      "brand": "19\" GERMANY",
+      "model": "G7-05002",
+      "category": "Heavy Duty Fan Set (2x Ø4\")",
+      "used_in": [
+        "5.1.1.1.4",
+        "5.2.1.1.4",
+        "5.2.1.2.4",
+        "5.2.2.1.4",
+        "5.2.3.1.4",
+        "5.2.4.1.4"
+      ]
+    },
+    "G1-60609": {
+      "file": "catalog/G1-60609.pdf",
+      "vendor": "SMART",
+      "brand": "19\" GERMANY",
+      "model": "G1-60609",
+      "category": "9U Rack",
+      "used_in": [
+        "5.2.1.2"
+      ]
+    },
+    "UV-9012H-SUS": {
+      "file": "(via fitz template)",
+      "vendor": "SMART",
+      "brand": "LINK",
+      "model": "UV-9012H-SUS",
+      "category": "UV Cabinet Stainless steel IP54/55",
+      "used_in": [
+        "5.1.2.1",
+        "5.1.3.1.1",
+        "5.1.4.1.1",
+        "5.1.5.1.1",
+        "5.1.6.1.1"
+      ]
+    },
+    "QO116C06RCBO30": {
+      "file": "catalog/PES_Schneider Electric_Square-D-QOE-QOvs-QObvs_QO116C06RCBO30.pdf",
+      "vendor": "SMART",
+      "brand": "Schneider Electric",
+      "model": "QO116C06RCBO30",
+      "category": "RCBO 1P+NS 16A 30mA",
+      "used_in": [
+        "5.1.2.2",
+        "5.1.3.1.2",
+        "5.1.4.1.2",
+        "5.1.5.1.2",
+        "5.1.6.1.2"
+      ]
+    },
+    "IRIV-PiControl-CM5": {
+      "file": "catalog/IRIV PiControl Datasheet.pdf",
+      "vendor": "SMART",
+      "brand": "Cytron Technologies",
+      "model": "IRIV PiControl CM5",
+      "category": "Industrial Raspberry Pi Controller",
+      "used_in": [
+        "5.1.2.3",
+        "5.1.3.1.3",
+        "5.1.4.1.3",
+        "5.1.5.1.3",
+        "5.1.6.1.3"
+      ]
+    },
+    "VTall-S203L-2": {
+      "file": "(no brand catalog)",
+      "vendor": "SMART",
+      "brand": "-",
+      "model": "VTall-S203L-2",
+      "category": "Vibration Sensor",
+      "used_in": [
+        "5.1.2.4",
+        "5.1.3.1.4"
+      ],
+      "notes": "Fabricate item — no brand logo, use 'ยี่ห้อ - รุ่น' dash-brand pattern"
+    },
+    "BOD-Proteus": {
+      "file": "catalog/Proteus-Datasheet-v2.0-updated-22-03-2022.pdf",
+      "vendor": "SMART",
+      "brand": "Proteus Instruments",
+      "model": "Water Quality Probe",
+      "category": "BOD Sensor",
+      "used_in": [
+        "5.1.4.2"
+      ]
+    },
+    "JG-LDO-N01": {
+      "file": "catalog/Shanghai Jiant/...",
+      "vendor": "SMART",
+      "brand": "JIANT",
+      "model": "JG-LDO-N01",
+      "category": "DO Sensor",
+      "used_in": [
+        "5.1.5.2"
+      ]
+    },
+    "Fahchy-LED-P3.91": {
+      "file": "catalog/fahchy.pdf",
+      "vendor": "SMART",
+      "brand": "Fahchy",
+      "model": "LED Display P3.91 SMD OUTDOOR",
+      "category": "LED Display Outdoor",
+      "used_in": [
+        "5.1.6.2"
+      ]
+    },
+    "Lenovo-SR630-V4": {
+      "file": "catalog/เครื่องคอมพิวเตอร์แม่ข่าย แบบที่ 2 -20250714-104659-sheet_server.pdf",
+      "vendor": "TRIO",
+      "brand": "Lenovo",
+      "model": "ThinkSystem SR630 V4",
+      "category": "Rack Server 1U",
+      "used_in": [
+        "5.1.1.2",
+        "5.2.1.3"
+      ],
+      "notes": "Same catalog re-used for 2 sections (description identical)"
+    },
+    "FortiGate-120G": {
+      "file": "catalog/อุปกรณ์ป้องกันเครือข่าย (Next Generation Firewall) แบบที่ 1 - fortigate-120g-series.pdf",
+      "vendor": "TRIO",
+      "brand": "Fortinet",
+      "model": "FortiGate 120G",
+      "category": "NGFW",
+      "used_in": [
+        "5.1.1.3"
+      ],
+      "pages": 11
+    },
+    "Ruijie-RG-NBS5100": {
+      "file": "catalog/อุปกรณ์กระจายสัญญาณ (L2 Switch) ขนาด 24 ช่อง แบบที่ 2 RG-NBS5100-24GT4SFP.pdf",
+      "vendor": "TRIO",
+      "brand": "Ruijie",
+      "model": "RG-NBS5100-24GT4SFP",
+      "category": "L2 Switch 24-port",
+      "used_in": [
+        "5.1.1.4"
+      ],
+      "pages": 15
+    },
+    "QNAP-TS-433-4G": {
+      "file": "catalog/อุปกรณ์สำหรับจัดเก็บข้อมูลแบบ NAS.pdf",
+      "vendor": "TRIO",
+      "brand": "QNAP",
+      "model": "TS-433-4G",
+      "category": "NAS 4-bay",
+      "used_in": [
+        "5.1.1.5"
+      ],
+      "pages": 2
+    },
+    "Apple-iPad-A16": {
+      "file": "catalog/iPad รุ่น 11 นิ้ว (ชิป A16) - ข้อมูลทางเทคนิค - Apple.html",
+      "vendor": "TRIO",
+      "brand": "Apple",
+      "model": "iPad 11 นิ้ว ชิป A16",
+      "category": "Tablet",
+      "used_in": [
+        "5.1.1.6"
+      ],
+      "notes": "HTML source; converted to PDF with weasyprint. Image references may break (warnings ignored)"
+    },
+    "Cleanline-T10K33LV2": {
+      "file": "catalog/เครื่องสำรองไฟฟ้า ขนาด 10 kVA (ระบบไฟฟ้า 3 เฟส) cleanline_t10k33lv2-3.pdf",
+      "vendor": "TRIO",
+      "brand": "Cleanline",
+      "model": "T-10K33LV2",
+      "category": "UPS 10kVA 3-phase",
+      "used_in": [
+        "5.1.1.7"
+      ],
+      "pages": 2
+    },
+    "H3C-S6520X-16ST-SI": {
+      "file": "catalog/H3C S6520X-SI  Core Switches .pdf",
+      "vendor": "TRIO",
+      "brand": "H3C",
+      "model": "S6520X-16ST-SI",
+      "category": "Core Switch 16-port 1/10G SFP+",
+      "used_in": [
+        "5.2.1.5"
+      ],
+      "pages": 29,
+      "notes": "Box switching capacity = 1.44Tbps > TOR 1.0Tbps (สูงกว่า)"
+    },
+    "HP-Pro-Tower-280-G9": {
+      "file": "catalog/เครื่องคอมพิวเตอร์สำหรับประมวลผล แบบที่ 2  -HP Pro Tower 280 G9 PCI Desktop PC.pdf",
+      "vendor": "TRIO",
+      "brand": "HP",
+      "model": "Pro Tower 280 G9 PCI",
+      "category": "Desktop PC",
+      "used_in": [
+        "5.2.1.4"
+      ],
+      "pages": 5
+    },
+    "HP-P27-G5-Monitor": {
+      "file": "catalog/จอภาพ 27 -  HP P27 G5 FHD Monitor.pdf",
+      "vendor": "TRIO",
+      "brand": "HP",
+      "model": "P27 G5 FHD Monitor",
+      "category": "Monitor 27\"",
+      "used_in": [
+        "5.2.1.4-9"
+      ],
+      "notes": "Sub-item ของ 5.2.1.4 (ข้อย่อย 9 จอแสดงภาพ)"
+    },
+    "Ruijie-RG-CS85-24GT8XS-D": {
+      "file": "catalog/อุปกรณ์กระจายสัญญาณ (L3 Switch) ขนาด 24 ช่อง - RG-CS85-24GT8XS-D รองรับ 24-Port 1GE RJ45 Layer 3.pdf",
+      "vendor": "TRIO",
+      "brand": "Ruijie",
+      "model": "RG-CS85-24GT8XS-D",
+      "category": "L3 Switch 24-port",
+      "used_in": [
+        "5.2.1.6",
+        "5.2.2.2",
+        "5.2.3.2",
+        "5.2.4.2"
+      ],
+      "pages": 20,
+      "notes": "MAC address table 64,000 > TOR 32,000 (สูงกว่า)"
+    },
+    "Ruijie-CS4220-16GT-240": {
+      "file": "catalog/อุปกรณ์กระจายสัญญาณแบบ PoE (PoE L2 Switch) ขนาด 16 ช่อง -CS4220-16GT-240_V2_datasheet_20250429 ICT.pdf",
+      "vendor": "TRIO",
+      "brand": "Ruijie",
+      "model": "CS4220-16GT-240",
+      "category": "PoE L2 Switch 16-port",
+      "used_in": [
+        "5.2.1.8",
+        "5.2.2.3",
+        "5.2.3.3",
+        "5.2.4.3",
+        "5.2.5.5",
+        "5.2.6.5"
+      ],
+      "pages": 3
+    },
+    "Dahua-NVR5432-EI": {
+      "file": "catalog/อุปกรณ์บันทึกภาพแบบเครือข่าย (Network Video Recorder) แบบ 32 ช่อง -NVR5432-EI.pdf",
+      "vendor": "TRIO",
+      "brand": "Dahua",
+      "model": "NVR5432-EI",
+      "category": "NVR 32-channel",
+      "used_in": [
+        "5.2.1.7"
+      ],
+      "pages": 3
+    },
+    "Dahua-DH-IPC-HFW4231T-ZAS": {
+      "file": "catalog/กล้องโทรทัศน์วงจรปิดชนิดเครือข่าย DH-IPC-HFW4231T-ZAS_S0(ICT).pdf",
+      "vendor": "TRIO",
+      "brand": "Dahua",
+      "model": "DH-IPC-HFW4231T-ZAS",
+      "category": "CCTV Bullet Network Camera",
+      "used_in": [
+        "5.2.1.11",
+        "5.2.2.6",
+        "5.2.3.6",
+        "5.2.4.6",
+        "5.2.5.6",
+        "5.2.6.6"
+      ],
+      "pages": 3,
+      "notes": "(ICT) suffix = pre-annotated with Highlight + numbered labels (4.1, 4.2...) — DO NOT REMOVE"
+    },
+    "TP-Link-EAP660-HD": {
+      "file": "catalog/อุปกรณ์กระจายสัญญาณไร้สาย (Access Point) แบบที่ 2 -t_EAP660 HD.pdf",
+      "vendor": "TRIO",
+      "brand": "TP-Link",
+      "model": "EAP660 HD",
+      "category": "Wi-Fi 6 Access Point",
+      "used_in": [
+        "5.2.1.12",
+        "5.2.2.7",
+        "5.2.3.7",
+        "5.2.4.7"
+      ],
+      "pages": 14
+    },
+    "UF-2010A": {
+      "file": "catalog/UF-2010.pdf",
+      "vendor": "SMART",
+      "brand": "LINK",
+      "model": "UF-2010A",
+      "category": "Fiber Optic Rack Mount Drawer Type 24 Core",
+      "used_in": [
+        "5.2.1.9",
+        "5.2.2.4",
+        "5.2.3.4",
+        "5.2.4.4"
+      ]
+    },
+    "UF-4112A": {
+      "file": "catalog/UF-4112A.pdf",
+      "vendor": "SMART",
+      "brand": "LINK",
+      "model": "UF-4112A",
+      "category": "Outdoor FO Cabinet 24-core",
+      "used_in": [
+        "5.2.5.3",
+        "5.2.6.3"
+      ]
+    },
+    "UFC9312A": {
+      "file": "catalog/UFC9312A.pdf",
+      "vendor": "SMART",
+      "brand": "LINK",
+      "model": "UFC9312A",
+      "category": "Fiber Optic Single Mode 12 Core Outdoor Armored",
+      "used_in": [
+        "5.2.2.8",
+        "5.2.3.8",
+        "5.2.4.8",
+        "5.2.5.7",
+        "5.2.6.7"
+      ]
+    },
+    "US-9106LSZH": {
+      "file": "catalog/US-9106LSZH.pdf",
+      "vendor": "SMART",
+      "brand": "LINK",
+      "model": "US-9106LSZH",
+      "category": "CAT6 UTP 250MHz LSZH cable",
+      "used_in": [
+        "5.2.1.13",
+        "5.2.2.9",
+        "5.2.3.9",
+        "5.2.4.9",
+        "5.1.8.1"
+      ],
+      "pages": 3,
+      "notes": "TOR says 'Twisted Pair Shield' but US-9106LSZH is unshielded UTP — verify with vendor"
+    },
+    "Thai-union-VCT": {
+      "file": "catalog/สายไฟ thai union vct.pdf",
+      "vendor": "SMART",
+      "brand": "Thai union",
+      "model": "VCT 300/500 V 70°C 60227 IEC 53 (VCT)",
+      "category": "VCT Power Cable",
+      "used_in": [
+        "5.2.2.10",
+        "5.2.3.10",
+        "5.2.4.10"
+      ],
+      "pages": 12,
+      "notes": "Landscape 12-page brochure; brand on P1 cover, spec on P5"
+    },
+    "Union-EMT-3-4": {
+      "file": "catalog/แคตตาล็อค Union emt.pdf",
+      "vendor": "SMART",
+      "brand": "Arrow Syndicate UNION",
+      "model": "EMT 3/4\" (20mm)",
+      "category": "Electric Metallic Tubing conduit",
+      "used_in": [
+        "5.2.1.14",
+        "5.2.2.11",
+        "5.2.3.11",
+        "5.2.4.11",
+        "5.1.8.2"
+      ],
+      "pages": 5,
+      "notes": "/in filename → replace with - (3-4 instead of 3/4)"
+    },
+    "SR-HDPE-CONDUIT": {
+      "file": "catalog/ท่อ HDPE ขนาด 32 มิลลิเมตร PE100 PN 10.pdf",
+      "vendor": "SR",
+      "brand": "Plastison (Made in Thailand)",
+      "model": "SR HDPE CONDUIT 32mm PN10 PE100",
+      "category": "HDPE Conduit Pipe",
+      "used_in": [
+        "5.2.2.12",
+        "5.2.3.12",
+        "5.2.4.12",
+        "5.2.5.8",
+        "5.2.6.8"
+      ],
+      "pages": 2,
+      "notes": "P2 = MiT (Made in Thailand) certificate; brand identification via cert"
+    },
+    "KJL-Wireway": {
+      "file": "catalog/KJL KWSS wireway.pdf",
+      "vendor": "SMART",
+      "brand": "KJL",
+      "model": "KWSS Wireway 100x100x1.2mm",
+      "category": "Wire Way Steel",
+      "used_in": [
+        "5.1.8.3"
+      ]
+    },
+    "เสา-4m": {
+      "file": "catalog/เสาสำหรับติดตั้งตู้ควบคุม 4 เมตร.pdf",
+      "vendor": "SMART",
+      "brand": "-",
+      "model": "Steel Pipe Ø4\" hot-dip galvanized",
+      "category": "Pole 4m for cabinet mounting",
+      "used_in": [
+        "5.1.3.2",
+        "5.1.4.3",
+        "5.1.6.3",
+        "5.2.5.1",
+        "5.2.6.1"
+      ],
+      "notes": "Fabricate — no brand. Has PLAN + SECTION A foundation rects on P2"
+    }
+  }
+}

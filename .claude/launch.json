@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "comply-verify",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["comply_verify_gui.py"],
+      "port": 5173
+    }
+  ]
+}

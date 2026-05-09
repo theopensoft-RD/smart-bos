@@ -1,0 +1,211 @@
+{
+  "_meta": {
+    "generated": "2026-05-09",
+    "schema": "Reusable rect coord templates per catalog. Used by future agents to clone annotations.",
+    "coord_system": "PyMuPDF (top-left origin), all coords in PDF points (1pt = 1/72 inch)",
+    "label_convention": "ยี่ห้อ for brand, รุ่น for model, '5.X.Y.Z ข้อย่อย N.' for spec sub-items",
+    "label_font": "hebo (Helvetica-Bold), red (1,0,0)"
+  },
+  "catalogs": {
+    "G3N-61142_rack_42U": {
+      "page_size": [595, 842],
+      "header": {
+        "rect": [15, 5, 580.22, 57.8],
+        "fontsize": 14, "color": "red", "align": "center"
+      },
+      "P1": {
+        "brand": {"rect": [431.9, 724.5, 568.2, 796.0], "label": "ยี่ห้อ", "label_rect": [378, 720, 428, 758]},
+        "ข้อ_2_galvanized": {"rect": [195, 542.1, 405.9, 560], "label": "5.X.Y.Z ข้อ 2)", "label_color": "BLACK"}
+      },
+      "P3_ordering": {
+        "model": {"rect": [441.1, 230.6, 490.4, 249.4], "label": "รุ่น", "label_rect": [481.7, 235.2, 525.6, 246.4]},
+        "ข้อ_1_size_42U": {"rect": [115.8, 229.9, 208.2, 248.7], "label": "5.X.Y.Z ข้อ 1)"}
+      }
+    },
+    "UF-2010A_fiber_drawer": {
+      "page_size": [2480, 3507],
+      "header": {
+        "rect": [50, 30, 2430, 180],
+        "fontsize": 60, "color": "red", "align": "center",
+        "note": "Large page → 60pt font (proportional to A4's 14pt × 4.17 scale)"
+      },
+      "P1": {
+        "brand-link": {"rect": [80, 60, 530, 320], "label": "ยี่ห้อ", "label_rect": [80, 325, 280, 365]},
+        "24cores": {"rect": [30, 2493, 1700, 2552], "label": "{section}", "label_rect": [1710, 2510, 1900, 2545]},
+        "accessories": {"rect": [30, 2570, 1500, 2755], "label": "{section}", "label_rect": [1510, 2655, 1700, 2690]},
+        "model": {"rect": [289, 3304, 461, 3341], "label": "รุ่น", "label_rect": [470, 3305, 580, 3340]}
+      }
+    },
+    "UFC9312A_fiber_armored": {
+      "page_size": [595, 842],
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "brand-link": {"rect": [10, 5, 75, 40], "label": "ยี่ห้อ", "label_rect": [80, 42, 130, 60]},
+        "armored-title": {"rect": [85, 22, 340, 80], "label": "{section}", "label_rect": [345, 38, 405, 60]},
+        "singlemode-row": {"rect": [85, 758, 235, 776], "label": "{section}", "label_rect": [238, 760, 295, 776]},
+        "model-cell": {"rect": [360, 758, 435, 776], "label": "รุ่น", "label_rect": [440, 760, 480, 776]},
+        "armored-body": {"rect": [49.5, 126.9, 552.0, 152.0], "label": "ใช้ภายนอกอาคาร", "label_rect": [277, 116, 337, 138]}
+      }
+    },
+    "US-9106LSZH_cat6_utp": {
+      "page_size": [595, 842],
+      "pages": 3,
+      "header": {"rect": [15, 10, 580.3, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "brand-link": {"rect": [22.7, 65.5, 166.7, 150.9], "label": "ยี่ห้อ", "label_rect": [169.6, 118.6, 219.6, 138.6]},
+        "model-us-9106": {"rect": [38.4, 159.1, 146.4, 189.9], "label": "รุ่น", "label_rect": [148.6, 166.8, 183.6, 186.8]},
+        "indoor-installation-img": {"rect": [47.1, 284.4, 160.8, 378.7], "label": "Twisted Pair Shield", "label_rect": [61.7, 272.8, 156.4, 303.4]}
+      },
+      "P3": {
+        "indoor-installation-order": {"rect": [34.0, 671.9, 529.9, 695.5], "label": "รุ่น", "label_rect": [21, 681.3, 56, 701.3]},
+        "indoor-installation-applications": {"rect": [44.6, 420.2, 210.5, 438.9], "label": "ใช้ภายในอาคาร", "label_rect": [212.8, 428.6, 284.1, 448.6]}
+      }
+    },
+    "EMT_union_3-4_inch": {
+      "page_size": [595, 841],
+      "pages": 5,
+      "spec_page": "P3",
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P3": {
+        "brand-union": {"rect": [26.4, 31.1, 149.0, 70.4], "label": "ยี่ห้อ", "label_rect": [12.9, 46.1, 26.9, 56.5], "label_position": "LEFT"},
+        "emt-title": {"rect": [120, 5, 400, 50], "label": "{section}", "label_rect": [405, 20, 460, 40]},
+        "ul797-spec": {"rect": [26.5, 79.2, 267.3, 100.0], "label": "{section}", "label_rect": [274.5, 84.5, 329.5, 101.5]},
+        "size-3-4-row": {"rect": [39, 245, 556, 271], "label": "รุ่น", "label_rect": [560, 250, 590, 268]}
+      }
+    },
+    "VCT_thai_union": {
+      "page_size": [842, 388],
+      "page_orientation": "landscape",
+      "pages": 12,
+      "header": {"rect": [15, 5, 826.9, 25], "fontsize": 12, "color": "red", "align": "center"},
+      "P1_cover": {
+        "brand-thai-union": {"rect": [484.4, 86.9, 582.5, 157.7], "label": "ยี่ห้อ", "label_rect": [483.8, 78.5, 538.8, 95.5], "label_position": "ABOVE"}
+      },
+      "P5_vct_spec": {
+        "vct-title": {"rect": [461.2, 218.9, 486.1, 246.5], "label": "{section}"},
+        "model-cable-label": {"rect": [635.6, 101.9, 777.3, 119.5], "label": "รุ่น", "label_rect": [708.9, 91.6, 768.9, 116.6]},
+        "tis-standard": {"rect": [484.8, 238.5, 798.3, 246.5]}
+      }
+    },
+    "Cleanline_T-10K33LV2_UPS": {
+      "page_size": [595, 842],
+      "pages": 2,
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "brand-cleanline": {"rect": [20, 65, 200, 110], "label": "ยี่ห้อ", "label_rect": [205, 80, 245, 100]},
+        "model-tower-row": {"rect": [35, 332, 240, 350], "label": "รุ่น", "label_rect": [245, 335, 285, 350]}
+      },
+      "P2_spec_table": {
+        "model-col-header": {"rect": [143, 70, 198, 87]},
+        "s1_capacity_10kva": {"rect": [143, 105, 200, 122], "label": "{section} ข้อย่อย 1.", "label_rect": [205, 108, 285, 122]},
+        "s2_input_3ph_380": {"rect": [178, 154, 268, 168], "label": "{section} ข้อย่อย 2.", "label_rect": [275, 156, 355, 168]},
+        "s3_output_220": {"rect": [178, 239, 280, 257], "label": "{section} ข้อย่อย 3.", "label_rect": [285, 243, 365, 257]}
+      }
+    },
+    "Lenovo_SR630_V4": {
+      "page_size": [612, 792],
+      "pages": 3,
+      "header": {"rect": [15, 10, 597, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "brand-lenovo": {"rect": [545, 30, 605, 95], "label": "ยี่ห้อ", "label_rect": [495, 50, 540, 70]},
+        "model-title": {"rect": [35, 120, 350, 195], "label": "รุ่น", "label_rect": [35, 200, 75, 218]}
+      },
+      "P2_specifications": {
+        "s1_s2_cpu": {"rect": [220, 261, 580, 318], "label": "{section} ข้อย่อย 1.+2.", "label_rect": [35, 235, 215, 251]},
+        "s3_memory": {"rect": [220, 318, 580, 360], "label": "{section} ข้อย่อย 3.", "label_rect": [35, 318, 100, 332]},
+        "s6_network": {"rect": [220, 391, 580, 500], "label": "{section} ข้อย่อย 6.", "label_rect": [115, 395, 215, 410]},
+        "s4_raid": {"rect": [220, 501, 580, 545], "label": "{section} ข้อย่อย 4.", "label_rect": [35, 505, 90, 519]},
+        "s7_power": {"rect": [220, 545, 580, 558], "label": "{section} ข้อย่อย 7.", "label_rect": [35, 549, 75, 564]}
+      }
+    },
+    "Ruijie_RG-CS85_L3_Switch": {
+      "page_size": [595, 842],
+      "pages": 20,
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1_cover": {
+        "brand-ruijie": {"rect": [225, 745, 290, 768], "label": "ยี่ห้อ", "label_rect": [195, 750, 222, 765]},
+        "model-series": {"rect": [40, 590, 285, 685], "label": "รุ่น", "label_rect": [290, 620, 320, 645]}
+      },
+      "P5_port_spec": {
+        "s3_1000baseT_24": {"rect": [127, 682, 195, 705], "label": "{section} ข้อย่อย 3.", "label_rect": [195, 685, 280, 700]}
+      },
+      "P6_system_spec": {
+        "s6_mac_64k": {"rect": [128, 583, 195, 605], "label": "{section} ข้อย่อย 6.", "label_rect": [200, 586, 285, 600]}
+      }
+    },
+    "Ruijie_CS4220_PoE_L2": {
+      "page_size": [595, 842],
+      "pages": 3,
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "brand-ruijie-bottom": {"rect": [264, 813, 320, 832], "label": "ยี่ห้อ", "label_rect": [326, 815, 365, 830]}
+      },
+      "P2_spec": {
+        "model-title": {"rect": [35, 18, 360, 45], "label": "รุ่น", "label_rect": [365, 25, 405, 42]},
+        "s1_layer2": {"rect": [125, 90, 200, 107], "label": "{section} ข้อย่อย 1."},
+        "s2_switching_capacity": {"rect": [125, 107, 200, 124], "label": "{section} ข้อย่อย 2."},
+        "s3_mac_8k": {"rect": [395, 124, 460, 141], "label": "{section} ข้อย่อย 3."},
+        "s4_16_ports_1000baseT": {"rect": [125, 142, 200, 160], "label": "{section} ข้อย่อย 4."},
+        "s5_sfp": {"rect": [125, 159, 250, 178], "label": "{section} ข้อย่อย 5."},
+        "s6_web_management": {"rect": [395, 397, 470, 414], "label": "{section} ข้อย่อย 6."}
+      }
+    },
+    "TP-Link_EAP660_HD_AP": {
+      "page_size": [595, 842],
+      "pages": 14,
+      "header": {"rect": [15, 10, 580, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1_cover": {
+        "brand-tplink": {"rect": [35, 30, 200, 70], "label": "ยี่ห้อ", "label_rect": [205, 40, 245, 60]},
+        "model-eap660": {"rect": [40, 745, 130, 760], "label": "รุ่น", "label_rect": [135, 745, 175, 760]}
+      },
+      "P9_specification": {
+        "s1_wifi_std_ax": {"rect": [160, 128, 350, 145], "label": "{section} ข้อย่อย 1.", "label_rect": [360, 130, 440, 144]},
+        "s2_dual_band": {"rect": [160, 140, 350, 215], "label": "{section} ข้อย่อย 2.", "label_rect": [360, 175, 440, 195]},
+        "s3_wpa3": {"rect": [330, 568, 410, 590], "label": "{section} ข้อย่อย 3.", "label_rect": [415, 573, 490, 587]}
+      }
+    },
+    "Dahua_CCTV_DH-IPC-HFW4231T-ZAS": {
+      "page_size": [612, 792],
+      "pages": 3,
+      "header": {"rect": [15, 10, 597, 50], "fontsize": 10, "color": "red", "align": "center"},
+      "_notes": "Pre-annotated by ICT TOR (numbered labels 4.1, 4.2, ... + Highlights). DO NOT REMOVE pre-existing annotations.",
+      "P1": {
+        "brand-dahua": {"rect": [545, 30, 600, 50], "label": "ยี่ห้อ", "label_rect": [498, 33, 540, 47]},
+        "model-title": {"rect": [35, 65, 300, 95], "label": "รุ่น", "label_rect": [305, 70, 340, 90]}
+      },
+      "P2_technical_spec": {
+        "s5_image_sensor": {"rect": [125, 86, 270, 100], "label": "{section} ข้อย่อย 5."},
+        "s1_resolution_1920": {"rect": [125, 103, 280, 117], "label": "{section} ข้อย่อย 1."},
+        "s4_min_illum": {"rect": [125, 188, 270, 213], "label": "{section} ข้อย่อย 4."},
+        "s6_focal_length": {"rect": [125, 243, 270, 257], "label": "{section} ข้อย่อย 6."},
+        "s11_codec_h264": {"rect": [410, 62, 510, 78], "label": "{section} ข้อย่อย 11."},
+        "s9_streaming_3": {"rect": [410, 142, 510, 158], "label": "{section} ข้อย่อย 9."},
+        "s3_day_night_icr": {"rect": [410, 263, 510, 278], "label": "{section} ข้อย่อย 3."},
+        "s2_frame_rate": {"rect": [410, 130, 510, 142], "label": "{section} ข้อย่อย 2."},
+        "s8_wdr": {"rect": [320, 314, 410, 332], "label": "{section} ข้อย่อย 8."},
+        "s7_motion": {"rect": [320, 393, 410, 410], "label": "{section} ข้อย่อย 7."},
+        "s13_network_10_100": {"rect": [410, 644, 510, 658], "label": "{section} ข้อย่อย 13."},
+        "s12_ipv6": {"rect": [410, 678, 510, 692], "label": "{section} ข้อย่อย 12."},
+        "s10_onvif": {"rect": [410, 712, 510, 728], "label": "{section} ข้อย่อย 10."},
+        "s18_sdk_api": {"rect": [320, 660, 410, 678], "label": "{section} ข้อย่อย 18."}
+      },
+      "P3_environmental": {
+        "s14_ip67": {"rect": [125, 475, 200, 492], "label": "{section} ข้อย่อย 14.", "note": "IP67 > IP66 → สูงกว่า"},
+        "s15_op_temp": {"rect": [125, 422, 280, 442], "label": "{section} ข้อย่อย 15."}
+      }
+    },
+    "SR_HDPE_CONDUIT_32mm": {
+      "page_size": [612, 792],
+      "pages": 2,
+      "spec_page": "P2 (MiT certificate)",
+      "header": {"rect": [15, 10, 597, 50], "fontsize": 14, "color": "red", "align": "center"},
+      "P1": {
+        "spec-32mm-pe100": {"rect": [225, 0, 490, 25], "label": "{section}", "label_rect": [490, 5, 545, 22]}
+      },
+      "P2_certificate": {
+        "brand-cert-mit": {"rect": [243, 264, 400, 295], "label": "ยี่ห้อ", "label_rect": [405, 270, 460, 290]},
+        "model-sr-hdpe-line": {"rect": [80, 398, 545, 430], "label": "รุ่น", "label_rect": [50, 405, 78, 425], "label_position": "LEFT"}
+      }
+    }
+  }
+}
