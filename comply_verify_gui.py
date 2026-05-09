@@ -1262,6 +1262,82 @@ def safe_iter_annots(page) -> list:
 # Subtype, Rect, and Contents fields out of each <<...>> block.
 # ---------------------------------------------------------------------------
 
+def _split_annots_array_items(arr_text: str) -> list[tuple[str, str]]:
+    """Split a page /Annots array into ordered items, preserving the
+    distinction between inline blocks and indirect references.
+
+    Returns list of (kind, text) where kind ∈ {'ref', 'inline'} so callers
+    can splice and rebuild the array correctly when removing an inline
+    block (the indirect refs must keep their positions).
+    """
+    s = arr_text.strip()
+    if s.startswith("["):
+        s = s[1:]
+    if s.endswith("]"):
+        s = s[:-1]
+    items: list[tuple[str, str]] = []
+    i = 0
+    L = len(s)
+    while i < L:
+        c = s[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == "<" and i + 1 < L and s[i + 1] == "<":
+            depth = 1
+            j = i + 2
+            while j + 1 < L and depth > 0:
+                if s[j] == "<" and s[j + 1] == "<":
+                    depth += 1; j += 2
+                elif s[j] == ">" and s[j + 1] == ">":
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            items.append(("inline", s[i:j]))
+            i = j
+        else:
+            m = re.match(r"\d+\s+\d+\s+R", s[i:])
+            if m:
+                items.append(("ref", m.group(0)))
+                i += m.end()
+            else:
+                i += 1
+    return items
+
+
+def _delete_inline_annot(doc, page, inline_index: int) -> bool:
+    """Remove the N-th inline annotation from this page's /Annots array.
+
+    PyMuPDF can't address inline annots via load_annot (they have xref=0),
+    so we rewrite the array string in place with xref_set_key.
+    """
+    try:
+        page_xref = page.xref
+        kind, value = doc.xref_get_key(page_xref, "Annots")
+    except Exception:
+        return False
+    if kind != "array" or not value:
+        return False
+    items = _split_annots_array_items(value)
+    seen_inline = -1
+    target_pos = -1
+    for k, (knd, _val) in enumerate(items):
+        if knd == "inline":
+            seen_inline += 1
+            if seen_inline == inline_index:
+                target_pos = k
+                break
+    if target_pos < 0:
+        return False
+    items.pop(target_pos)
+    new_value = "[" + " ".join(v for _, v in items) + "]"
+    try:
+        doc.xref_set_key(page_xref, "Annots", new_value)
+    except Exception:
+        return False
+    return True
+
+
 def _split_dict_blocks(arr_text: str) -> list[str]:
     """Split '[<<...>><<...>>]' into ['<<...>>', '<<...>>'] at depth 1."""
     s = arr_text.strip()
@@ -1443,10 +1519,15 @@ def all_annots_on_page(doc, page, page_num: int) -> list[dict]:
             "rect": r,
             "contents": c,
         })
+    inline_idx = 0
     for ann in parse_inline_annots(doc, page):
         r = [round(c, 2) for c in ann["rect"]]
         sig = (ann["type"], tuple(r), ann["contents"])
+        # Even if the signature matches a real annot we keep the inline_index
+        # counter advancing — its value must mirror the position of the inline
+        # block in the page's /Annots array for delete-path lookups.
         if sig in seen_signatures:
+            inline_idx += 1
             continue
         out.append({
             "xref": 0,            # 0 = inline (not editable via load_annot)
@@ -1455,7 +1536,9 @@ def all_annots_on_page(doc, page, page_num: int) -> list[dict]:
             "rect": r,
             "contents": ann["contents"],
             "_inline": True,
+            "inline_index": inline_idx,
         })
+        inline_idx += 1
     return out
 
 
@@ -1828,6 +1911,28 @@ def apply_pdf_edits(pdf_path: Path, edits: list[dict]) -> dict:
                 # remove from map so future ops don't try to use it
                 xref_to_page.pop(xref, None)
                 applied += 1
+
+            elif action == "delete_inline":
+                # Remove an inline annotation (xref=0) by rewriting the page's
+                # /Annots array string. inline_index identifies which inline
+                # block to drop, preserving order of indirect refs.
+                pno = int(edit["page"]) - 1
+                if pno < 0 or pno >= len(doc):
+                    errors += 1
+                    error_msgs.append("delete_inline: bad page")
+                    continue
+                page = _get_page(pno)
+                idx = int(edit.get("inline_index", -1))
+                if idx < 0:
+                    errors += 1
+                    error_msgs.append("delete_inline: missing inline_index")
+                    continue
+                if _delete_inline_annot(doc, page, idx):
+                    applied += 1
+                else:
+                    errors += 1
+                    error_msgs.append(
+                        f"delete_inline: page {pno + 1} idx {idx} not found")
 
             elif action == "create":
                 pno = int(edit["page"]) - 1
@@ -4438,7 +4543,7 @@ INDEX_HTML = r"""<!doctype html>
   --topbar-h:    52px;
   --pane-head-h: 40px;
   --toolbar-h:   40px;            /* unified canvas/edit toolbar height */
-  --action-bar-h: 64px;            /* docked bottom action bar height */
+  --action-bar-h: 76px;            /* fixed; tall enough for verdict + notes */
   --tree-w:      320px;
   --tree-w-md:   280px;
   --tree-row-h:  32px;
@@ -5564,21 +5669,26 @@ select { cursor: pointer; }
 }
 .manual-mode-banner button.cancel:hover { background: var(--c-danger-soft); }
 
-/* ── Docked bottom action bar (no longer floating) ──────────────── */
-/* Always occupies the grid 'action' row even when no row is selected,
-   so panes don't reflow when a row gets picked. Inner content fades
-   in/out via .ab-content visibility, never the bar itself. */
+/* ── Docked bottom action bar (locked height — no flicker) ─────── */
+/* Always occupies the same grid 'action' row, ALWAYS at fixed height.
+   Internal sections (top + bottom) sized exactly so notes textarea
+   never expands. Empty state is an absolute overlay, doesn't affect
+   the box. */
 .action-bar {
   position: relative;
   background: var(--c-surface);
   border-top: 1px solid var(--c-border);
-  padding: var(--s-4) var(--s-7);
+  padding: var(--s-3) var(--s-7);
   z-index: 60;
   box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.06);
   width: 100%;
-  min-height: var(--action-bar-h);
+  height: var(--action-bar-h);    /* FIXED — not min-height */
+  max-height: var(--action-bar-h);
   display: flex; flex-direction: column;
   justify-content: center;
+  gap: var(--s-2);
+  overflow: hidden;
+  contain: layout size;            /* tells the browser its size never depends on children */
 }
 .action-bar.is-empty .ab-top,
 .action-bar.is-empty .ab-bottom { visibility: hidden; }
@@ -5592,6 +5702,14 @@ select { cursor: pointer; }
   display: block;
   position: absolute; left: 0; right: 0; top: 50%;
   transform: translateY(-50%);
+}
+.action-bar .ab-top {
+  flex-shrink: 0;
+  min-height: 0;
+}
+.action-bar .ab-bottom {
+  flex-shrink: 0;
+  min-height: 0;
 }
 .ab-top { display: flex; gap: var(--s-6); align-items: center; flex-wrap: wrap; }
 .ab-row-info {
@@ -5733,12 +5851,20 @@ select { cursor: pointer; }
   outline-offset: 2px;
 }
 
-.ab-bottom { display: flex; gap: var(--s-4); align-items: center; margin-top: var(--s-4); }
+.ab-bottom {
+  display: flex; gap: var(--s-4); align-items: center;
+  margin-top: 0;
+  height: 28px;
+}
 .ab-bottom textarea {
-  flex: 1; resize: none; min-height: 32px; max-height: 100px;
-  padding: 6px var(--s-5); font: inherit; font-size: var(--t-base);
+  flex: 1; resize: none;
+  height: 28px; min-height: 28px; max-height: 28px;
+  padding: 4px var(--s-5);
+  font: inherit; font-size: var(--t-base);
+  line-height: 18px;
   border: 1px solid var(--c-border-strong); border-radius: var(--r-md);
   background: var(--c-surface);
+  white-space: nowrap; overflow: hidden;
 }
 .ab-bottom .reset-btn {
   font-size: var(--t-sm); color: var(--c-text-soft);
@@ -8391,11 +8517,22 @@ function toggleEditMode() {
 function initEditAnnots() {
   EDIT_ANNOTS = [];
   ORIGINAL_ANNOTS_BY_ID = {};
+  let inlineSeq = 0;
   for (const a of (CURRENT_PDF.meta.annots || [])) {
-    const id = 'x' + a.xref;
+    // Inline annots all have xref=0 — use their inline_index to give each a
+    // unique client _id, so click+select+delete works per-annot.
+    let id;
+    if (a.xref) {
+      id = 'x' + a.xref;
+    } else {
+      const idx = (typeof a.inline_index === 'number') ? a.inline_index : inlineSeq++;
+      id = 'inl-p' + a.page + '-' + idx;
+    }
     const copy = {
       _id: id,
       xref: a.xref,
+      _inline: !a.xref,                      // mark for delete-path routing
+      _inline_index: a.inline_index,
       page: a.page,
       type: a.type,
       rect: a.rect.slice(),
@@ -8851,7 +8988,17 @@ function computeEditDiff() {
       if (a.type === 'FreeText') e.fontsize = freetextFontSize(a.rect);
       edits.push(e);
     } else if (!a._isNew && a._deleted) {
-      edits.push({action:'delete', xref: a.xref});
+      if (a._inline || !a.xref) {
+        // Inline annot — backend rewrites the page's /Annots array
+        edits.push({action: 'delete_inline',
+                    page: a.page,
+                    inline_index: a._inline_index,
+                    type: a.type,
+                    rect: a.rect,
+                    contents: a.contents});
+      } else {
+        edits.push({action: 'delete', xref: a.xref});
+      }
     } else if (!a._isNew && !a._deleted) {
       const o = ORIGINAL_ANNOTS_BY_ID[a._id];
       if (!o) continue;
