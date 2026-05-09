@@ -1196,26 +1196,57 @@ def save_status(data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def safe_iter_annots(page) -> list:
-    """Iterate annotations skipping ones with broken appearance streams."""
+    """Iterate annotations skipping ones with broken appearance streams.
+
+    PyMuPDF's ``page.annots()`` generator can fail entirely (returning zero
+    annots) when the page mixes drawable annots with broken Image/Form
+    annotations — common in our catalog PDFs. To stay robust we bypass the
+    generator and call ``load_annot(xref)`` per entry from ``annot_xrefs()``
+    with individual try/except. A single bad annot only loses itself, never
+    the rest of the page.
+    """
     out = []
     try:
-        gen = page.annots()
-        if gen is None:
-            return out
-        # iterate manually so a single bad annot doesn't kill the whole loop
-        while True:
-            try:
-                ann = next(gen)
-            except StopIteration:
-                break
-            except Exception:
-                # bad annot — try to continue past it
-                continue
-            if ann is None:
-                continue
-            out.append(ann)
+        xrefs = page.annot_xrefs()
     except Exception:
-        pass
+        # fall back to the old generator path if annot_xrefs is unavailable
+        try:
+            gen = page.annots()
+            if gen is None:
+                return out
+            while True:
+                try:
+                    ann = next(gen)
+                except StopIteration:
+                    break
+                except Exception:
+                    continue
+                if ann is None:
+                    continue
+                out.append(ann)
+        except Exception:
+            pass
+        return out
+
+    for entry in xrefs:
+        # entry is typically (xref, anntype, name); fall back gracefully
+        if isinstance(entry, tuple):
+            xref = entry[0]
+        else:
+            try:
+                xref = int(entry)
+            except Exception:
+                continue
+        if not xref:
+            # xref=0 means an inline annot — handled by parse_inline_annots
+            continue
+        try:
+            ann = page.load_annot(int(xref))
+        except Exception:
+            continue
+        if ann is None:
+            continue
+        out.append(ann)
     return out
 
 
