@@ -718,6 +718,33 @@ menu). Debounced 250 ms input; Tab/Enter accepts, ArrowUp/Down
 navigates. The panel closes when the editor blurs (with a 120 ms
 delay so a click on a suggestion is processed first).
 
+### 12.10h Print-ready PDF export (Phase 2.1)
+
+`app/export.py` builds a deliverable PDF combining Cover + TOC +
+Comply Spec sheet + grouped catalogs + optional Audit appendix.
+
+The TOC-before-catalogs ordering requires a placeholder-and-replace
+trick:
+
+```
+1. Insert N estimated TOC placeholder pages
+2. Build all downstream content, accumulating (level, title, page1)
+3. Render the real TOC into a temp doc (returns actual_pages)
+4. delete_pages(placeholders); insert_pdf(tmp, start_at=placeholder_pos)
+5. Apply Δ = (actual_pages - placeholder_pages) to every bookmark
+   whose page > TOC region
+6. doc.set_toc(bookmarks) → reader navigation tree
+7. Per-page footer: project name + "Page N of M"
+```
+
+Annotations bake transparently because `fitz.insert_pdf` preserves
+the source PDF's appearance streams — Phase 17's WYSIWYG layer
+flows into the export with zero special-casing.
+
+Endpoints: `/api/export/preview`, `/api/export/package`,
+`/api/export/download`, `/api/export/list`.
+Output dir: `_db/exports/` (gitignored, per-machine).
+
 ### 12.10g Multi-company / catalog library (Phase 2)
 
 Adds an *additive* layer over the xlsx-canonical model: a catalog

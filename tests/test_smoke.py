@@ -148,6 +148,42 @@ def test_catalog_metadata_update(client, gui):
     client.patch(f"/api/catalogs/{cat_id}", json={"description": ""})
 
 
+def test_export_preview_and_build_small(client, gui):
+    """Phase 2.1: export preview + build (small subset).
+
+    We use ``section=5.1.1`` so the build only ingests one section's
+    worth of catalogs (~30 pages of dividers + catalogs + cover/TOC).
+    """
+    # Preview
+    r = client.get("/api/export/preview?mode=full&section=5.1.1")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j.get("ok") is True
+    assert j.get("project", {}).get("name")
+
+    # Build a small package
+    r = client.post("/api/export/package?mode=full&section=5.1.1")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j.get("ok") is True
+    assert j["page_count"] >= 3, "expected at least cover + TOC + comply"
+    assert j["byte_size"] > 1000
+    assert "download_url" in j
+
+    # Download it back
+    r = client.get(j["download_url"])
+    assert r.status_code == 200
+    assert r.content_type == "application/pdf"
+    pdf_bytes = r.get_data()
+    assert pdf_bytes.startswith(b"%PDF-"), "not a valid PDF"
+
+    # /api/export/list shows our build
+    r = client.get("/api/export/list")
+    assert r.status_code == 200
+    items = r.get_json().get("items", [])
+    assert any(it["filename"] == j["filename"] for it in items)
+
+
 def test_claude_stream_endpoint_responds_or_503(client, gui):
     """Phase 1 SSE endpoint: must either stream events (200, text/event-stream)
     or return 503 with a hint when the provider can't be initialized.

@@ -1006,3 +1006,99 @@ POST   /api/row/apply_catalog       ← bind catalog → row + write Col D
 - **One ingest function rules them all** — the same
   `ingest_output_dir` runs at boot AND from a `Re-scan` button in
   the UI. Idempotent design = single code path.
+
+---
+
+## Phase 2.1 — Export print-ready compliance package
+
+**Goal**: a single click that produces a polished, submittable PDF
+combining the Comply Spec sheet + every catalog (with annotations
+baked-in) + a navigable cover/TOC/bookmark structure.
+
+**Built** — `app/export.py` (~360 LOC)
+
+The package layout:
+```
+[Cover page]                A4 portrait, indigo top band,
+                            project name, code, generated-at,
+                            version (= latest snapshot ID)
+
+[Table of Contents]         Auto-generated from bookmark tree:
+                            level 1 = section, level 2 = catalog group,
+                            level 3 = individual catalog. Page numbers
+                            right-aligned with dotted leader.
+
+[Comply Spec Sheet]         Verbatim insert from existing
+                            output/Comply spec*.pdf
+                            (the user's xlsx export — we don't
+                            re-render xlsx→PDF here)
+
+[Catalogs]                  Section divider page (big indigo header)
+                            then catalog PDFs in order. Annotations
+                            already baked in (Phase 17 WYSIWYG).
+
+[Audit Log appendix]        Optional. Last 200 audit_log entries
+                            timestamp + action + target.
+
+[Footer on every page]      "Project Name" left, "Page N of M" right,
+                            thin separator above.
+
+[PDF outline / bookmarks]   Set via doc.set_toc() — readers like
+                            Acrobat / Preview show a navigation tree.
+```
+
+**TOC trick**: we don't know real page numbers until catalogs are
+inserted, but the TOC must come *before* them. Solution:
+1. Insert N placeholder pages where TOC will go
+2. Build everything else, recording (level, title, page1) tuples
+3. Render the real TOC into a temp doc
+4. `delete_pages` the placeholders, `insert_pdf(tmp, start_at=...)`
+5. Adjust all bookmarks whose page > TOC region by Δ = real_pages -
+   placeholder_pages
+
+**New REST endpoints**:
+```
+GET  /api/export/preview         what would be in the package
+                                 (counts, by section, comply present?)
+POST /api/export/package         build it, returns
+                                 {filename, page_count, byte_size,
+                                  download_url, sections[]}
+GET  /api/export/download?file=  stream a built PDF
+GET  /api/export/list            recent builds in _db/exports/
+```
+
+Query params (POST and preview):
+- `mode=full|comply_only|catalogs_only`
+- `section=5.1.1` (filter to a section root)
+- `bound_only=1` (only catalogs already linked to project rows)
+- `include_audit=1`
+
+**New UI** — Export modal (rail icon `📄`):
+- Two fieldsets: "What to include" (mode radios) + "Filters"
+  (bound-only / section / audit toggles)
+- Live preview pane updates on every option change
+  (debounced 200 ms): "Project · Comply sheet status · 309 catalogs
+  · 5.1.1: 27 · 5.1.2: 12 · …"
+- Build PDF → loading state → triggers `<a download>` automatically
+- Recent exports `<details>` listing reusable download links
+
+**Performance**: 311 pages (1 section, ~30 catalogs) in **0.26 s**.
+Full 309-catalog package would be roughly 2-3 s on this machine.
+
+**Verification**:
+- 8/8 smoke tests pass (was 7; +1 for `test_export_preview_and_build_small`)
+- ruff: All checks passed
+- pyright app/: 0 errors
+- Manual: built package opens in Preview/Acrobat with working
+  bookmarks, TOC clickable, page numbers correct
+
+**Lessons**:
+- **`fitz.insert_pdf` preserves appearance streams**, so all the
+  Phase 17 WYSIWYG work flows straight into the export — no special
+  handling needed for annotated PDFs.
+- **Placeholder-then-replace** is the cleanest way to handle
+  forward-references in PDF generation. Tracking +Δ shifts all
+  downstream bookmarks at the end.
+- **PyMuPDF doesn't support multi-page text wrapping in one call**;
+  manually paginate when content might exceed one page (audit log,
+  long TOC).

@@ -5173,6 +5173,223 @@ def api_row_apply_catalog():
                     "catalog_id": cat_id, "page": page})
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Export — print-ready PDF compliance package
+# ─────────────────────────────────────────────────────────────────────
+
+@app.route("/api/export/preview")
+def api_export_preview():
+    """Return what would be included WITHOUT generating the PDF.
+
+    Optional query params (same as /api/export/package):
+      mode=full|comply_only|catalogs_only
+      section=5.1.1            (filter to one section root)
+      include_audit=1
+      bound_only=1             (only catalogs bound to project rows)
+    """
+    proj = catalog.get_active_project()
+    if not proj:
+        return jsonify({"ok": False, "error": "no active project"}), 503
+
+    mode = request.args.get("mode", "full")
+    section_filter = request.args.get("section") or None
+    bound_only = request.args.get("bound_only") == "1"
+    include_audit = request.args.get("include_audit") == "1"
+
+    items = catalog.list_catalogs(section=section_filter, limit=1000)
+    if bound_only:
+        bound_ids = set()
+        with db.conn() as c:
+            for r in c.execute(
+                "SELECT DISTINCT catalog_id FROM row_catalog_links "
+                "WHERE project_id = ?", (proj["project_id"],)):
+                bound_ids.add(r["catalog_id"])
+        items = [c for c in items if c["catalog_id"] in bound_ids]
+
+    # Sort by section_hint (None goes last), then brand, then model
+    items.sort(key=lambda c: (c.get("section_hint") or "zzz",
+                                c.get("brand") or "",
+                                c.get("model") or ""))
+
+    summary = {
+        "ok": True,
+        "project": {
+            "name": proj.get("name"),
+            "code": proj.get("code"),
+            "company_name": proj.get("company_name"),
+        },
+        "mode": mode,
+        "comply_pdf_present": False,
+        "catalog_count": 0,
+        "catalogs_per_section": {},
+        "audit_count": 0,
+    }
+
+    if mode in ("full", "comply_only"):
+        comply_candidates = sorted(OUTPUT.glob("Comply spec*.pdf"))
+        # Skip backup files like ".pre-take-it-sync.bak"
+        comply_candidates = [p for p in comply_candidates
+                              if ".bak" not in p.name and "~$" not in p.name]
+        if comply_candidates:
+            summary["comply_pdf_present"] = True
+            summary["comply_pdf_name"] = comply_candidates[0].name
+
+    if mode in ("full", "catalogs_only"):
+        summary["catalog_count"] = len(items)
+        per_section: dict[str, int] = {}
+        for c in items:
+            key = c.get("section_hint") or "Other"
+            per_section[key] = per_section.get(key, 0) + 1
+        summary["catalogs_per_section"] = per_section
+
+    if include_audit:
+        with db.conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) AS n FROM audit_log").fetchone()["n"]
+        summary["audit_count"] = min(n, 200)
+
+    return jsonify(summary)
+
+
+@app.route("/api/export/package", methods=["POST"])
+def api_export_package():
+    """Build a print-ready PDF package and stream it back as attachment.
+
+    Body / query params:
+      mode=full|comply_only|catalogs_only
+      section=...               (optional section filter, e.g. '5.1')
+      bound_only=1              (only catalogs already bound to rows)
+      include_audit=1
+      filename=...              (optional download filename)
+    """
+    from app import export as exp_mod
+
+    args = request.get_json(silent=True) or {}
+    args.update(request.args.to_dict())  # query params override body
+
+    mode = args.get("mode", "full")
+    section_filter = args.get("section") or None
+    bound_only = str(args.get("bound_only", "")) == "1"
+    include_audit = str(args.get("include_audit", "")) == "1"
+
+    proj = catalog.get_active_project()
+    if not proj:
+        return jsonify({"ok": False, "error": "no active project"}), 503
+
+    # Comply PDF (xlsx export the user keeps in output/)
+    comply_pdf_path = None
+    if mode in ("full", "comply_only"):
+        candidates = [p for p in sorted(OUTPUT.glob("Comply spec*.pdf"))
+                      if ".bak" not in p.name and "~$" not in p.name]
+        comply_pdf_path = candidates[0] if candidates else None
+
+    # Catalogs
+    catalogs_in_export: list[dict] = []
+    if mode in ("full", "catalogs_only"):
+        items = catalog.list_catalogs(section=section_filter, limit=2000)
+        if bound_only:
+            with db.conn() as c:
+                bound = {r["catalog_id"] for r in c.execute(
+                    "SELECT DISTINCT catalog_id FROM row_catalog_links "
+                    "WHERE project_id = ?", (proj["project_id"],))}
+            items = [c for c in items if c["catalog_id"] in bound]
+        items.sort(key=lambda c: (c.get("section_hint") or "zzz",
+                                    c.get("brand") or "",
+                                    c.get("model") or ""))
+        catalogs_in_export = items
+
+    # Audit
+    audit_entries = []
+    if include_audit:
+        with db.conn() as c:
+            audit_entries = [dict(r) for r in c.execute(
+                "SELECT * FROM audit_log ORDER BY ts DESC LIMIT 200")]
+
+    # Output path
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_name = (proj.get("name") or "project").replace("/", "-").replace(" ", "_")
+    default_filename = f"compliance-package-{safe_name}-{ts}.pdf"
+    filename = args.get("filename") or default_filename
+    out_dir = ROOT / "_db" / "exports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / filename
+
+    # Version label = latest snapshot id (informational)
+    version_label = ""
+    try:
+        latest = get_version_sync_status().get("latest")
+        if latest:
+            version_label = latest.get("id", "")
+    except Exception:
+        pass
+
+    try:
+        result = exp_mod.build_package(
+            out_path=out_path,
+            company_name=proj.get("company_name") or "Smart Solution",
+            project_name=proj.get("name") or "Project",
+            project_code=proj.get("code"),
+            version=version_label,
+            comply_pdf_path=comply_pdf_path,
+            catalogs=catalogs_in_export,
+            output_root=OUTPUT,
+            include_audit=include_audit,
+            audit_entries=audit_entries,
+        )
+    except Exception as e:
+        sys.stderr.write(f"[export] build failed: {e}\n")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    db.log_audit(action="export_package", target_type="project",
+                 target_id=str(proj.get("project_id")),
+                 details={"mode": mode, "filename": filename,
+                          "page_count": result["page_count"],
+                          "byte_size": result["byte_size"]},
+                 actor="user")
+
+    # Return JSON pointing at the download URL — frontend triggers
+    # an <a download>. We deliberately don't return the bytes inline so
+    # large packages don't time out the request.
+    return jsonify({
+        **result,
+        "filename": filename,
+        "download_url": f"/api/export/download?file={filename}",
+    })
+
+
+@app.route("/api/export/download")
+def api_export_download():
+    """Stream a previously-built export. Path safety: must live inside
+    _db/exports/."""
+    name = request.args.get("file") or ""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return jsonify({"ok": False, "error": "bad filename"}), 400
+    p = ROOT / "_db" / "exports" / name
+    if not p.exists():
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return send_file(str(p), mimetype="application/pdf",
+                      as_attachment=True, download_name=name)
+
+
+@app.route("/api/export/list")
+def api_export_list():
+    """List previously generated exports for the user to redownload."""
+    out_dir = ROOT / "_db" / "exports"
+    if not out_dir.exists():
+        return jsonify({"ok": True, "items": []})
+    items = []
+    for p in sorted(out_dir.glob("*.pdf"), key=lambda x: x.stat().st_mtime,
+                     reverse=True):
+        st = p.stat()
+        items.append({
+            "filename": p.name,
+            "byte_size": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            "download_url": f"/api/export/download?file={p.name}",
+        })
+    return jsonify({"ok": True, "items": items[:50]})
+
+
 @app.route("/api/learn/feedback", methods=["POST"])
 def api_learn_feedback():
     """Direct feedback recorder (e.g., when user edits Col D outside the
@@ -8736,6 +8953,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
     <button class="rail-btn active" data-panel="tree" onclick="setRailPanel('tree')" title="Row tree" aria-label="row tree"><svg class="ico" aria-hidden="true"><use href="#i-folder"/></svg></button>
     <button class="rail-btn" data-panel="search" onclick="openCmdK()" title="Search · ⌘K" aria-label="search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg></button>
     <button class="rail-btn" data-panel="catalogs" onclick="openCatalogBrowser()" title="Catalog library" aria-label="catalogs"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg></button>
+    <button class="rail-btn" data-panel="export" onclick="openExportModal()" title="Export print-ready PDF" aria-label="export"><svg class="ico" aria-hidden="true"><use href="#i-file"/></svg></button>
     <button class="rail-btn" data-panel="learn" onclick="setRailPanel('learn')" title="Learning patterns" aria-label="learn"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg></button>
     <button class="rail-btn" data-panel="versions" onclick="setRailPanel('versions')" title="Project versions" aria-label="versions"><svg class="ico" aria-hidden="true"><use href="#i-package"/></svg></button>
     <button class="rail-btn" data-panel="audit" onclick="setRailPanel('audit')" title="Database & audit" aria-label="audit"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg></button>
@@ -9398,6 +9616,75 @@ body[data-embedded="1"] .kbd-help { display: none; }
     </div>
   </div>
 </div>
+
+<!-- ──────────── Phase 2.1: Export modal (print-ready PDF) ──────────── -->
+<div class="modal-bg" id="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" onclick="if(event.target.id==='export-modal') closeExportModal()">
+  <div class="modal" id="export-modal-inner" style="max-width:760px;width:96vw;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h3 id="export-modal-title" style="margin:0;display:flex;align-items:center;gap:8px">
+        <svg class="ico" aria-hidden="true"><use href="#i-file"/></svg>
+        <span>Export print-ready PDF</span>
+      </h3>
+      <button class="modal-close" onclick="closeExportModal()" aria-label="close">✕</button>
+    </div>
+    <div style="padding:var(--s-5);overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:var(--s-4)">
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s-4)">
+        <fieldset style="border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-3) var(--s-4)">
+          <legend style="font-size:var(--t-xs);font-weight:700;color:var(--c-text-soft);text-transform:uppercase;padding:0 4px">What to include</legend>
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 0">
+            <input type="radio" name="export-mode" value="full" checked onchange="exportPreviewRefresh()">
+            <span><strong>Full package</strong> — Cover + TOC + Comply + all catalogs</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 0">
+            <input type="radio" name="export-mode" value="comply_only" onchange="exportPreviewRefresh()">
+            <span>Comply spec sheet only</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 0">
+            <input type="radio" name="export-mode" value="catalogs_only" onchange="exportPreviewRefresh()">
+            <span>Catalogs only (no comply sheet)</span>
+          </label>
+        </fieldset>
+
+        <fieldset style="border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-3) var(--s-4)">
+          <legend style="font-size:var(--t-xs);font-weight:700;color:var(--c-text-soft);text-transform:uppercase;padding:0 4px">Filters</legend>
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 0">
+            <input type="checkbox" id="export-bound-only" onchange="exportPreviewRefresh()">
+            <span>Only catalogs <strong>bound to rows</strong> (skip unused)</span>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px;padding:4px 0">
+            <span style="font-size:var(--t-xs);color:var(--c-text-muted)">Section filter (optional, e.g. <code>5.1.1</code>):</span>
+            <input type="text" id="export-section" placeholder="leave empty for all" oninput="exportPreviewRefreshDebounced()" style="font-family:var(--f-mono);font-size:var(--t-sm);padding:4px 6px;border:1px solid var(--c-border);border-radius:var(--r-sm)">
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 0">
+            <input type="checkbox" id="export-include-audit" onchange="exportPreviewRefresh()">
+            <span>Append audit log</span>
+          </label>
+        </fieldset>
+      </div>
+
+      <div id="export-preview" style="background:var(--c-bg-soft);border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-4);font-size:var(--t-sm);min-height:120px">
+        <div style="color:var(--c-text-faint);font-style:italic">loading preview…</div>
+      </div>
+
+      <div style="display:flex;gap:var(--s-3);justify-content:flex-end">
+        <button class="btn" onclick="closeExportModal()">Cancel</button>
+        <button class="btn btn-primary" id="export-build-btn" onclick="exportBuild()">
+          <svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg>
+          <span>Build PDF</span>
+        </button>
+      </div>
+
+      <details style="font-size:var(--t-xs);color:var(--c-text-soft)">
+        <summary style="cursor:pointer;font-weight:600">Recent exports</summary>
+        <div id="export-recent" style="margin-top:6px;font-family:var(--f-mono)">loading…</div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────── Phase 2: Catalog browser modal ──────────── -->
+<!-- (already moved above? — keep below toast div) -->
 
 <!-- Toast notifications (top-right) -->
 <div id="toasts" class="toast-stack" role="region" aria-live="polite" aria-label="notifications"></div>
@@ -12726,6 +13013,109 @@ function catalogOpenPdf(pdf_rel) {
   if (!pdf_rel) return;
   window.open(`/api/raw_pdf?rel=${encodeURIComponent(pdf_rel)}`, '_blank');
 }
+// ── Phase 2.1: Export print-ready PDF ────────────────────────────
+let _EXPORT_TIMER = 0;
+function openExportModal() {
+  document.getElementById('export-modal').classList.add('show');
+  exportPreviewRefresh();
+  exportLoadRecent();
+}
+function closeExportModal() {
+  document.getElementById('export-modal').classList.remove('show');
+}
+function exportPreviewRefreshDebounced() {
+  if (_EXPORT_TIMER) clearTimeout(_EXPORT_TIMER);
+  _EXPORT_TIMER = setTimeout(exportPreviewRefresh, 200);
+}
+function _exportArgs() {
+  const mode = document.querySelector('input[name="export-mode"]:checked')?.value || 'full';
+  const section = document.getElementById('export-section').value.trim();
+  const bound_only = document.getElementById('export-bound-only').checked;
+  const include_audit = document.getElementById('export-include-audit').checked;
+  const params = new URLSearchParams();
+  params.set('mode', mode);
+  if (section) params.set('section', section);
+  if (bound_only) params.set('bound_only', '1');
+  if (include_audit) params.set('include_audit', '1');
+  return params;
+}
+async function exportPreviewRefresh() {
+  const box = document.getElementById('export-preview');
+  if (!box) return;
+  box.innerHTML = '<div style="color:var(--c-text-faint);font-style:italic">loading preview…</div>';
+  try {
+    const r = await fetch(`/api/export/preview?${_exportArgs().toString()}`);
+    const j = await r.json();
+    if (!j.ok) {
+      box.innerHTML = `<div style="color:var(--c-danger-text)">${escapeHtml(j.error || 'preview failed')}</div>`;
+      return;
+    }
+    const sec = j.catalogs_per_section || {};
+    const sec_lines = Object.entries(sec).slice(0, 8).map(([s,n]) => `${s}: ${n}`).join(' · ');
+    const more = Object.keys(sec).length > 8 ? ` …+${Object.keys(sec).length - 8} more` : '';
+    box.innerHTML = `
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:baseline">
+        <div style="color:var(--c-text-muted);font-weight:600">Project:</div>
+        <div>${escapeHtml(j.project?.name || '?')} <span style="color:var(--c-text-faint)">(${escapeHtml(j.project?.company_name || '')})</span></div>
+
+        <div style="color:var(--c-text-muted);font-weight:600">Comply sheet:</div>
+        <div>${j.comply_pdf_present
+          ? `<span style="color:var(--c-success-text)">✓ ${escapeHtml(j.comply_pdf_name || 'Comply spec*.pdf')}</span>`
+          : `<span style="color:var(--c-warn-text)">⚠ no Comply spec PDF in output/ — generate from xlsx in Excel/LibreOffice first</span>`}</div>
+
+        <div style="color:var(--c-text-muted);font-weight:600">Catalogs:</div>
+        <div>${j.catalog_count || 0} catalogs <span style="color:var(--c-text-faint);font-size:var(--t-xs)">${sec_lines}${more}</span></div>
+
+        ${j.audit_count ? `<div style="color:var(--c-text-muted);font-weight:600">Audit:</div><div>${j.audit_count} entries</div>` : ''}
+      </div>`;
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--c-danger-text)">error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+async function exportBuild() {
+  const btn = document.getElementById('export-build-btn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `${ico('refresh',14)}<span>Building…</span>`;
+  try {
+    const r = await fetch(`/api/export/package?${_exportArgs().toString()}`, {method: 'POST'});
+    const j = await r.json();
+    if (!j.ok) {
+      toast('Build failed', j.error || 'unknown', 'error', 5000);
+      return;
+    }
+    toast('✓ Export ready',
+          `${j.page_count} pages · ${(j.byte_size/1024).toFixed(0)} KB`,
+          'learn', 5000);
+    // Trigger download
+    const a = document.createElement('a');
+    a.href = j.download_url;
+    a.download = j.filename || 'compliance-package.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    exportLoadRecent();
+  } catch (e) {
+    toast('Build error', e.message, 'error', 5000);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  }
+}
+async function exportLoadRecent() {
+  const box = document.getElementById('export-recent');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/export/list');
+    const j = await r.json();
+    const items = j.items || [];
+    if (!items.length) { box.innerHTML = '<span style="color:var(--c-text-faint)">none yet</span>'; return; }
+    box.innerHTML = items.slice(0, 8).map(it => `
+      <div style="display:flex;gap:8px;align-items:baseline;padding:2px 0">
+        <a href="${escapeHtml(it.download_url)}" download="${escapeHtml(it.filename)}" style="color:var(--c-primary);text-decoration:none">${escapeHtml(it.filename)}</a>
+        <span style="color:var(--c-text-faint);font-size:11px">${(it.byte_size/1024).toFixed(0)} KB · ${escapeHtml(it.mtime)}</span>
+      </div>`).join('');
+  } catch (e) { box.innerHTML = `<span style="color:var(--c-danger-text)">${escapeHtml(e.message)}</span>`; }
+}
+
 async function catalogReingest() {
   toast('Re-scanning…', 'reading output/ for new PDFs', 'info', 2000);
   try {
