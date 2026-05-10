@@ -718,6 +718,74 @@ menu). Debounced 250 ms input; Tab/Enter accepts, ArrowUp/Down
 navigates. The panel closes when the editor blurs (with a 120 ms
 delay so a click on a suggestion is processed first).
 
+### 12.10g Multi-company / catalog library (Phase 2)
+
+Adds an *additive* layer over the xlsx-canonical model: a catalog
+library that's reusable across projects, with metadata + annotations
+editable in the DB. The xlsx is still the single source of truth for
+project state (Contract A), but catalogs are now first-class entities.
+
+```
+                ┌─────────────────────────────────┐
+                │  Catalog Library (DB)           │
+                │  ─────────────────────────────  │
+                │  catalogs                       │
+                │   ├─ pdf_rel, sha256, pages     │
+                │   ├─ brand, model, category     │
+                │   ├─ section_hint, description  │
+                │   └─ metadata_json              │
+                │                                 │
+                │  catalog_annotations  (DB-side  │
+                │                       templates)│
+                │  catalog_pages        (FTS text)│
+                └────────────┬────────────────────┘
+                             │
+                             ▼
+            ┌────────────────┴────────────────┐
+            │                                 │
+   ┌────────┴─────────┐             ┌─────────┴────────┐
+   │  Project A       │             │  Project B       │
+   │  (Pattaya/SP1)   │             │  (Pattaya/SP2)   │
+   │                  │             │                  │
+   │  rows            │             │  rows            │
+   │   └─ row_catalog │             │   └─ row_catalog │
+   │      _links ─────┼─── SHARES ──┼──── _links       │
+   └──────────────────┘             └──────────────────┘
+```
+
+**Key design decisions**:
+- **Catalog == PDF + metadata**, identified by `pdf_rel` (relative
+  to OUTPUT). De-dup key `pdf_sha256` for future "same file in
+  different folder" detection.
+- **Annotations in DB** going forward. For backwards compat the
+  PDF-baked annotations are still rendered (Phase 17 WYSIWYG).
+  Phase C will overlay DB annotations on top.
+- **Bindings are project-scoped**: `row_catalog_links (project_id,
+  row_num) → catalog_id`. Same row in different projects can use
+  different catalogs.
+- **Active project is implicit** in single-user UI — boot elects
+  one, `get_active_project()` is the only scope check needed for
+  MVP. UI multi-project switcher = Phase D.
+
+**Apply flow** (`POST /api/row/apply_catalog`):
+1. snapshot before mutation
+2. synthesize Col D (or use user-provided text)
+3. write Col D into xlsx (O_TRUNC dance for Google Drive)
+4. `load_rows() → sync_db_from_memory()`
+5. `bind_row_to_catalog(...)` records the link
+6. `db.log_audit(action="apply_catalog", ...)`
+
+**Module layout** (after Phase 2):
+```
+app/
+├── catalog.py             ← NEW: companies/projects/catalogs/links
+├── claude_code_provider.py
+├── core.py
+├── database.py            ← DB_VERSION=2 (added Phase 2 tables)
+├── learning.py
+└── anthropic_provider.py
+```
+
 ### 12.10f Claude Code as core provider (Phase 1)
 
 The module `app/claude_code_provider.py` is the new primary LLM

@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-DB_VERSION = 1
+DB_VERSION = 2  # bumped 2026-05-10: catalogs/companies/projects tables
 
 _DB_PATH: Path | None = None
 
@@ -283,6 +283,105 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 CREATE INDEX IF NOT EXISTS idx_llm_ts    ON llm_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_llm_row   ON llm_calls(row_num);
 CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_calls(model);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- Multi-company / catalog library (Phase 2 — added 2026-05-10)
+-- ─────────────────────────────────────────────────────────────────────────
+-- Companies own projects; projects use catalogs from the shared library.
+-- Catalogs are reusable across projects (same product datasheet for many
+-- compliance assignments). Annotations live in the DB so the user can
+-- edit them per-catalog without re-baking the PDF every time.
+
+CREATE TABLE IF NOT EXISTS companies (
+    company_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    code        TEXT UNIQUE,                  -- short slug, e.g. "PATTAYA"
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    project_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  INTEGER NOT NULL,
+    name        TEXT NOT NULL,                -- "Smart Plant 1"
+    code        TEXT,                          -- "SP1"
+    xlsx_rel    TEXT,                          -- relative to project root
+    output_rel  TEXT,                          -- "output" by default
+    is_active   INTEGER NOT NULL DEFAULT 0,    -- one project at a time gets =1
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(company_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_projects_company ON projects(company_id);
+CREATE INDEX IF NOT EXISTS idx_projects_active  ON projects(is_active);
+
+CREATE TABLE IF NOT EXISTS catalogs (
+    catalog_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    pdf_rel       TEXT NOT NULL UNIQUE,        -- relative to OUTPUT root
+    pdf_sha256    TEXT,                         -- de-dup key (NULL during ingest)
+    pages         INTEGER,
+    -- Curated metadata (editable in UI; populated by ingest with best-effort)
+    brand         TEXT,
+    model         TEXT,
+    category      TEXT,                         -- "Server", "Switch", "Rack", ...
+    section_hint  TEXT,                         -- inferred section "5.1.1.2"
+    description   TEXT,
+    -- Free-form vendor specs / notes
+    metadata_json TEXT,                         -- JSON dict
+    -- Soft-delete + audit
+    archived      INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_catalogs_brand    ON catalogs(brand);
+CREATE INDEX IF NOT EXISTS idx_catalogs_category ON catalogs(category);
+CREATE INDEX IF NOT EXISTS idx_catalogs_section  ON catalogs(section_hint);
+CREATE INDEX IF NOT EXISTS idx_catalogs_archived ON catalogs(archived);
+
+-- Per-page text excerpt for FTS-style search
+CREATE TABLE IF NOT EXISTS catalog_pages (
+    catalog_id  INTEGER NOT NULL,
+    page        INTEGER NOT NULL,
+    text_excerpt TEXT,
+    PRIMARY KEY (catalog_id, page),
+    FOREIGN KEY (catalog_id) REFERENCES catalogs(catalog_id) ON DELETE CASCADE
+);
+
+-- Catalog-level annotations stored in DB (editable independent of PDF baking).
+-- These are the "templates" — when applied to a project row, they're written
+-- through to the actual PDF via the existing apply_pdf_edits flow.
+CREATE TABLE IF NOT EXISTS catalog_annotations (
+    annot_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id    INTEGER NOT NULL,
+    page          INTEGER NOT NULL,
+    type          TEXT NOT NULL,                -- "Square" | "FreeText"
+    rect_json     TEXT NOT NULL,                -- "[x0,y0,x1,y1]"
+    contents      TEXT,
+    color_json    TEXT,                          -- "[r,g,b]" 0..1; default red
+    border_width  REAL DEFAULT 1.0,
+    -- Anchor metadata (Phase C: lets annot survive PDF page reflow)
+    anchor_text   TEXT,
+    -- Soft-delete
+    archived      INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP,
+    FOREIGN KEY (catalog_id) REFERENCES catalogs(catalog_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_annots ON catalog_annotations(catalog_id, page);
+
+-- Linkage: which catalog (and page) is currently bound to each project row.
+-- Composite PK so each (project, row) has exactly one active link.
+CREATE TABLE IF NOT EXISTS row_catalog_links (
+    project_id   INTEGER NOT NULL,
+    row_num      INTEGER NOT NULL,
+    catalog_id   INTEGER NOT NULL,
+    page         INTEGER,                        -- which page anchors this row
+    col_d_text   TEXT,                            -- generated Col D string
+    bound_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (project_id, row_num),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+    FOREIGN KEY (catalog_id) REFERENCES catalogs(catalog_id)
+);
+CREATE INDEX IF NOT EXISTS idx_row_links_catalog ON row_catalog_links(catalog_id);
 """
 
 

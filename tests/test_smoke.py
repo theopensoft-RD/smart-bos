@@ -92,6 +92,62 @@ def test_col_d_suggest_returns_ranked_candidates(client, gui):
         f"unexpected suggestion kinds: {kinds}"
 
 
+def test_catalog_endpoints_basic(client, gui):
+    """Phase 2: catalog library API + multi-project bootstrap.
+
+    Boot must:
+      - have ingested PDFs from output/ into the catalogs table
+      - created at least one company + one active project
+    """
+    r = client.get("/api/catalogs/stats")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["catalogs"] >= 1, "boot ingest didn't populate any catalogs"
+    assert j["companies"] >= 1
+    assert j["projects"] >= 1
+
+    # List endpoint
+    r = client.get("/api/catalogs?limit=5")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j.get("ok") is True
+    assert isinstance(j.get("items"), list)
+    assert len(j["items"]) >= 1
+
+    # Filter by query
+    cat = j["items"][0]
+    if cat.get("brand"):
+        r = client.get(f"/api/catalogs?q={cat['brand']}")
+        assert r.status_code == 200
+        assert any(c["catalog_id"] == cat["catalog_id"]
+                   for c in r.get_json()["items"])
+
+    # Get single catalog
+    r = client.get(f"/api/catalogs/{cat['catalog_id']}")
+    assert r.status_code == 200
+    assert r.get_json().get("catalog", {}).get("catalog_id") == cat["catalog_id"]
+
+    # Active project visible
+    r = client.get("/api/projects")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j.get("active") is not None
+    assert j["active"].get("project_id")
+
+
+def test_catalog_metadata_update(client, gui):
+    """Phase 2: PATCH /api/catalogs/<id> updates editable fields."""
+    r = client.get("/api/catalogs?limit=1")
+    cat_id = r.get_json()["items"][0]["catalog_id"]
+    new_desc = "test description from smoke suite"
+    r = client.patch(f"/api/catalogs/{cat_id}",
+                     json={"description": new_desc})
+    assert r.status_code == 200
+    assert r.get_json()["catalog"]["description"] == new_desc
+    # Cleanup
+    client.patch(f"/api/catalogs/{cat_id}", json={"description": ""})
+
+
 def test_claude_stream_endpoint_responds_or_503(client, gui):
     """Phase 1 SSE endpoint: must either stream events (200, text/event-stream)
     or return 503 with a hint when the provider can't be initialized.

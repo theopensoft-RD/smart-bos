@@ -877,3 +877,132 @@ each. Total < 2 sec.
 - **5 smoke tests beat 0 smoke tests** by infinity. Don't gold-plate
   — boot + 4 critical contracts already prevent regressions in
   Phase 17, Phase B3, Phase 1, etc.
+
+---
+
+## Phase 2 — Multi-company / catalog library
+
+**Goal**: turn the system from "Smart Plant 1 only" into a workbench
+that handles multiple companies and projects. Catalogs become
+**reusable** across projects (the same Lenovo SR630 datasheet can
+serve Plant 1, Plant 2, future-project-N) and editable in the DB
+(metadata + annotations) without re-baking the PDF every time.
+
+**Symlink relocation**: `output/` now points at the canonical
+co-work folder shared with the team:
+```
+~/Code/smart-bos/output → /GDrive/.../Pattaya Project/Smart Plant 1/co-work/claude-code/output
+```
+That folder has 309 PDFs (vs the old 124) — newer + richer.
+Snapshot taken before swap (`before-co-work-output-relink`).
+
+**New module `app/catalog.py`** (~440 LOC) — the additive layer.
+Exports:
+- `ingest_output_dir(root)` — idempotent migration: scans every PDF,
+  pulls sha256 + page count + heuristic brand/model/section, writes
+  a `catalogs` row.
+- `list_catalogs(brand, category, section, q)` — filtered listing
+- `get_catalog(id)` — full detail incl. annotations + page text
+- `update_catalog(id, **fields)` — patch metadata
+- `list_/add_/update_/delete_annotation(...)` — DB-stored annotations
+  per page (independent of PDF baking — Phase C will plumb these into
+  the render pipeline)
+- `bind_row_to_catalog(project, row, catalog, page, col_d)` — record
+  which catalog a given project row uses
+- Companies + projects helpers (upsert, list, set_active_project)
+
+**New DB tables** (DB_VERSION bumped 1→2; additive only — no
+migration needed because `IF NOT EXISTS`):
+- `companies (company_id, name, code)`
+- `projects (project_id, company_id, name, code, xlsx_rel, output_rel,
+   is_active)`
+- `catalogs (catalog_id, pdf_rel, sha256, pages, brand, model,
+   category, section_hint, description, metadata_json, archived)`
+- `catalog_pages (catalog_id, page, text_excerpt)` — for FTS-like
+  search later
+- `catalog_annotations (annot_id, catalog_id, page, type, rect_json,
+   contents, color_json, border_width, anchor_text, archived)`
+- `row_catalog_links (project_id, row_num, catalog_id, page,
+   col_d_text, bound_at)` — the binding record
+
+**Boot bootstrap**: after `sync_db_from_memory()`, the boot path:
+1. ensures a default company "Smart Solution" + project "Smart Plant
+   1" exists (only if none yet)
+2. runs `ingest_output_dir(OUTPUT)` — idempotent, picks up new PDFs
+   the user dropped into `output/` between runs
+
+Result on first run after relink:
+```
+[boot] catalog library: 309 PDFs scanned (309 new, 0 updated, 0 unchanged)
+       · active project=Smart Plant 1
+```
+
+**New REST endpoints** (~16 routes added):
+```
+GET    /api/catalogs?brand=&category=&section=&q=&limit=
+GET    /api/catalogs/stats
+GET    /api/catalogs/<id>
+PATCH  /api/catalogs/<id>           ← edit metadata
+GET    /api/catalogs/<id>/links     ← which rows use this catalog?
+POST   /api/catalogs/reingest       ← re-scan output/ for new PDFs
+GET    /api/catalogs/<id>/annotations
+POST   /api/catalogs/<id>/annotations
+PATCH  /api/catalogs/<id>/annotations/<aid>
+DELETE /api/catalogs/<id>/annotations/<aid>
+GET    /api/companies
+POST   /api/companies
+GET    /api/projects[?company_id=]
+POST   /api/projects
+POST   /api/projects/<id>/activate
+POST   /api/row/apply_catalog       ← bind catalog → row + write Col D
+```
+
+**New UI: Catalog Browser** (modal launched from rail)
+- Activity rail: new icon (book) opens the modal
+- Modal layout:
+  - Top: search box + section filter + Re-scan button + stats pill
+  - Left pane: filtered catalog list (section / brand / model /
+    pages / filename)
+  - Right pane: full detail with editable metadata form + Apply-to-row
+    button + annotations list + "Used by" links
+- Apply flow:
+  1. Click row in Comply tree → row becomes `SELECTED_ROW`
+  2. Open Catalog Browser
+  3. Pick catalog (left pane)
+  4. Click `Apply to R{N}` → prompts for page → POSTs
+     `/api/row/apply_catalog`
+  5. Backend pre-snaps, writes Col D into xlsx, refreshes ROWS,
+     records `row_catalog_links` entry, audit-logs the change
+  6. UI toasts success and reloads xlsx + tree to show the new Col D
+
+**Verification**:
+- 7/7 smoke tests pass (5 pre-existing + 2 new for catalog API)
+- `ruff check`: All checks passed!
+- `pyright app/`: 0 errors
+
+**Phase 2.5+ deferred**:
+- DB-stored annotations are *recorded* but not yet *rendered*. The
+  PDF baking pipeline still owns the visible annotations on disk.
+  Phase C will:
+  - Add an SVG overlay layer that paints `catalog_annotations` on
+    top of the rendered PDF page (so users edit them in DB-only flow
+    instead of mutating PDF)
+  - Add an "Apply to PDF" button that bakes a catalog's DB-stored
+    annotations into the actual PDF file
+- Catalog editor as a *standalone full-page workspace* (currently
+  edit-in-modal-side-panel)
+- Multi-company UI switcher (project selector currently implicit;
+  the API supports it but the topbar doesn't expose it yet)
+- FTS5 index over `catalog_pages.text_excerpt` (currently using LIKE)
+
+**Lessons captured**:
+- **Additive schema migrations** (every CREATE TABLE has IF NOT
+  EXISTS) mean a DB version bump doesn't require a custom migration
+  step. New tables coexist with the old.
+- **Symlinks abstract over storage location** — the running code
+  doesn't care that `output/` lives in GDrive vs local SSD vs S3
+  via fuse vs anything else, as long as Python can stat/read the
+  resolved path.
+- **One ingest function rules them all** — the same
+  `ingest_output_dir` runs at boot AND from a `Re-scan` button in
+  the UI. Idempotent design = single code path.

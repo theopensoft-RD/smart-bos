@@ -48,7 +48,7 @@ except ImportError:
     sys.stderr.write("Pillow is required. Install: pip3 install --user pillow\n")
     sys.exit(1)
 
-from app import core, learning
+from app import catalog, core, learning
 from app import database as db
 
 ROOT = Path(__file__).resolve().parent
@@ -4925,6 +4925,254 @@ def api_claude_stream():
     return Response(event_stream(), mimetype="text/event-stream", headers=headers)
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Phase 2 — Catalog library API (multi-company / multi-project)
+# ─────────────────────────────────────────────────────────────────────
+
+@app.route("/api/catalogs")
+def api_catalogs_list():
+    """List catalogs with optional filters: ?brand=&category=&section=&q=&archived=0."""
+    archived = request.args.get("archived") == "1"
+    items = catalog.list_catalogs(
+        brand=request.args.get("brand") or None,
+        category=request.args.get("category") or None,
+        section=request.args.get("section") or None,
+        q=request.args.get("q") or None,
+        archived=archived,
+        limit=int(request.args.get("limit", 200)),
+    )
+    return jsonify({"ok": True, "items": items, "count": len(items)})
+
+
+@app.route("/api/catalogs/stats")
+def api_catalogs_stats():
+    """Quick counts for the catalog rail badge + dashboard."""
+    return jsonify(catalog.stats())
+
+
+@app.route("/api/catalogs/<int:catalog_id>")
+def api_catalog_get(catalog_id):
+    """Full detail for a single catalog (incl. annotations + page text)."""
+    item = catalog.get_catalog(catalog_id)
+    if not item:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return jsonify({"ok": True, "catalog": item})
+
+
+@app.route("/api/catalogs/<int:catalog_id>", methods=["PATCH"])
+def api_catalog_update(catalog_id):
+    """Update editable metadata fields. Body = JSON with any of:
+    {brand, model, category, section_hint, description, metadata_json, archived}.
+    """
+    if not catalog.get_catalog(catalog_id):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        catalog.update_catalog(catalog_id, **data)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    db.log_audit(action="catalog_update", target_type="catalog",
+                 target_id=str(catalog_id), details=data, actor="user")
+    return jsonify({"ok": True, "catalog": catalog.get_catalog(catalog_id)})
+
+
+@app.route("/api/catalogs/<int:catalog_id>/links")
+def api_catalog_links(catalog_id):
+    """Which rows currently use this catalog?"""
+    return jsonify({"ok": True, "links": catalog.list_links_for_catalog(catalog_id)})
+
+
+@app.route("/api/catalogs/reingest", methods=["POST"])
+def api_catalogs_reingest():
+    """Re-scan output/ to pick up new PDFs (or refresh all metadata when
+    ?force=1)."""
+    force = request.args.get("force") == "1"
+    result = catalog.ingest_output_dir(OUTPUT, force=force)
+    return jsonify(result)
+
+
+# ─── Catalog annotations (DB-stored, editable independent of PDF) ────
+
+@app.route("/api/catalogs/<int:catalog_id>/annotations")
+def api_catalog_annots(catalog_id):
+    page = request.args.get("page")
+    page_n = int(page) if page else None
+    return jsonify({"ok": True,
+                    "annotations": catalog.list_annotations(catalog_id, page=page_n)})
+
+
+@app.route("/api/catalogs/<int:catalog_id>/annotations", methods=["POST"])
+def api_catalog_annots_add(catalog_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        annot_id = catalog.add_annotation(
+            catalog_id=catalog_id,
+            page=int(data["page"]),
+            type=data["type"],
+            rect=data["rect"],
+            contents=data.get("contents", ""),
+            color=data.get("color"),
+            border_width=float(data.get("border_width", 1.0)),
+            anchor_text=data.get("anchor_text"),
+        )
+    except (ValueError, KeyError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    db.log_audit(action="catalog_annot_add", target_type="catalog",
+                 target_id=str(catalog_id),
+                 details={"annot_id": annot_id, "page": data.get("page")},
+                 actor="user")
+    return jsonify({"ok": True, "annot_id": annot_id})
+
+
+@app.route("/api/catalogs/<int:catalog_id>/annotations/<int:annot_id>",
+           methods=["PATCH"])
+def api_catalog_annots_update(catalog_id, annot_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        catalog.update_annotation(annot_id, **data)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/catalogs/<int:catalog_id>/annotations/<int:annot_id>",
+           methods=["DELETE"])
+def api_catalog_annots_delete(catalog_id, annot_id):
+    catalog.delete_annotation(annot_id)
+    return jsonify({"ok": True})
+
+
+# ─── Companies / projects ────────────────────────────────────────────
+
+@app.route("/api/companies")
+def api_companies():
+    return jsonify({"ok": True, "items": catalog.list_companies()})
+
+
+@app.route("/api/companies", methods=["POST"])
+def api_companies_add():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    cid = catalog.upsert_company(name=name, code=data.get("code"))
+    return jsonify({"ok": True, "company_id": cid})
+
+
+@app.route("/api/projects")
+def api_projects():
+    company_id = request.args.get("company_id")
+    cid = int(company_id) if company_id else None
+    return jsonify({"ok": True,
+                    "items": catalog.list_projects(company_id=cid),
+                    "active": catalog.get_active_project()})
+
+
+@app.route("/api/projects", methods=["POST"])
+def api_projects_add():
+    data = request.get_json(silent=True) or {}
+    try:
+        pid = catalog.upsert_project(
+            company_id=int(data["company_id"]),
+            name=data["name"],
+            code=data.get("code"),
+            xlsx_rel=data.get("xlsx_rel"),
+            output_rel=data.get("output_rel", "output"),
+        )
+    except (KeyError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "project_id": pid})
+
+
+@app.route("/api/projects/<int:project_id>/activate", methods=["POST"])
+def api_projects_activate(project_id):
+    catalog.set_active_project(project_id)
+    return jsonify({"ok": True, "active": catalog.get_active_project()})
+
+
+# ─── Apply catalog → row (writes Col D + records link) ───────────────
+
+@app.route("/api/row/apply_catalog", methods=["POST"])
+def api_row_apply_catalog():
+    """Bind a catalog (and optional page) to a project row, generating Col D.
+
+    Body: {row, catalog_id, page?, col_d_text?}
+
+    If ``col_d_text`` is omitted we synthesize one using the same convention
+    as the existing rule-based generator (``make_col_d_for_row``).
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        row_num = int(data["row"])
+        cat_id = int(data["catalog_id"])
+    except (KeyError, ValueError):
+        return jsonify({"ok": False, "error": "row, catalog_id required"}), 400
+
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    cat = catalog.get_catalog(cat_id)
+    if not cat:
+        return jsonify({"ok": False, "error": "catalog not found"}), 404
+
+    page = int(data["page"]) if data.get("page") else None
+    col_d = (data.get("col_d_text") or "").strip()
+    if not col_d:
+        # Synthesize: use existing generator if possible
+        try:
+            role_info = detect_row_role(row_num)
+            pdf_path = OUTPUT / cat["pdf_rel"]
+            col_d = make_col_d_for_row(row, role_info, pdf_path, page) or ""
+        except Exception as e:
+            sys.stderr.write(f"[apply_catalog] synth col_d failed: {e}\n")
+            col_d = f"เอกสาร {cat.get('section_hint', '?')} {cat.get('brand') or ''} {cat.get('model') or ''}".strip()
+            if page:
+                col_d += f" หน้า {page}"
+
+    proj = catalog.get_active_project()
+    if not proj:
+        return jsonify({"ok": False, "error": "no active project"}), 500
+
+    # Pre-snap, write xlsx Col D, then refresh + record link
+    _run_version_cmd(["snap", f"pre-apply-catalog-row-{row_num}"], timeout=60)
+
+    try:
+        wb = openpyxl.load_workbook(XLSX_PATH)
+        ws = wb.active
+        original = (ws.cell(row_num, 4).value or "").strip()
+        ws.cell(row_num, 4).value = col_d
+        tmp = XLSX_PATH.with_suffix(".xlsx.tmp")
+        wb.save(str(tmp))
+        with open(tmp, "rb") as f:
+            buf = f.read()
+        fd = os.open(str(XLSX_PATH), os.O_WRONLY | os.O_TRUNC)
+        try:
+            os.write(fd, buf)
+        finally:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"xlsx write failed: {e}"}), 500
+
+    # Update memory + DB mirror
+    load_rows()
+    sync_db_from_memory()
+
+    # Record link
+    catalog.bind_row_to_catalog(
+        project_id=int(proj["project_id"]),
+        row_num=row_num, catalog_id=cat_id,
+        page=page, col_d_text=col_d,
+    )
+    db.log_audit(action="apply_catalog", target_type="row",
+                 target_id=str(row_num),
+                 before=original, after=col_d,
+                 details={"catalog_id": cat_id, "page": page}, actor="user")
+
+    return jsonify({"ok": True, "row": row_num, "col_d": col_d,
+                    "catalog_id": cat_id, "page": page})
+
+
 @app.route("/api/learn/feedback", methods=["POST"])
 def api_learn_feedback():
     """Direct feedback recorder (e.g., when user edits Col D outside the
@@ -6633,6 +6881,119 @@ select { cursor: pointer; }
 .col-d-menu button.primary { color: var(--c-success-text); font-weight: 600; }
 .col-d-menu button.primary:hover { background: var(--c-success-soft); }
 .col-d-menu .sep { height: 1px; background: var(--c-divider); margin: var(--s-2) 0; }
+
+/* ── Phase 2: Catalog browser ────────────────────────────────────── */
+#catalog-list .cat-item {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  font-size: var(--t-sm);
+  transition: background 100ms, border-color 100ms;
+}
+#catalog-list .cat-item:hover { background: var(--c-surface-2); border-color: var(--c-border); }
+#catalog-list .cat-item.active {
+  background: var(--c-primary-soft);
+  border-color: var(--c-primary);
+}
+#catalog-list .cat-item .cat-head {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 2px;
+}
+#catalog-list .cat-item .cat-section {
+  font-family: var(--f-mono); font-size: 11px;
+  background: var(--c-bg-soft); color: var(--c-text-soft);
+  padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+}
+#catalog-list .cat-item .cat-brand { font-weight: 600; color: var(--c-text); }
+#catalog-list .cat-item .cat-model { color: var(--c-text-soft); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#catalog-list .cat-item .cat-pages { font-size: 11px; color: var(--c-text-faint); }
+#catalog-list .cat-item .cat-rel {
+  font-size: 11px; color: var(--c-text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+#catalog-detail h3 { margin: 0 0 var(--s-3); display: flex; align-items: center; gap: 8px; }
+#catalog-detail h3 .cat-section-pill {
+  font-family: var(--f-mono); font-size: 12px;
+  background: var(--c-primary-soft); color: var(--c-primary);
+  padding: 2px 8px; border-radius: 999px; font-weight: 600;
+}
+#catalog-detail .meta-grid {
+  display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px;
+  margin-bottom: var(--s-4);
+  font-size: var(--t-sm);
+}
+#catalog-detail .meta-grid label {
+  color: var(--c-text-soft); font-weight: 600;
+  align-self: center;
+}
+#catalog-detail .meta-grid input,
+#catalog-detail .meta-grid textarea,
+#catalog-detail .meta-grid select {
+  font-size: var(--t-sm);
+  padding: 4px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  font-family: inherit;
+}
+#catalog-detail .meta-grid textarea { min-height: 50px; resize: vertical; }
+#catalog-detail .detail-actions {
+  display: flex; gap: var(--s-2); margin-top: var(--s-3); flex-wrap: wrap;
+}
+#catalog-detail .detail-actions button {
+  padding: 6px 12px; font-size: var(--t-sm); font-weight: 600;
+  border-radius: var(--r-sm); cursor: pointer;
+  border: 1px solid var(--c-border-strong); background: var(--c-surface);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+#catalog-detail .detail-actions button.primary {
+  background: var(--c-primary, #4f46e5); color: white; border-color: var(--c-primary, #4f46e5);
+}
+#catalog-detail .detail-actions button.primary:hover { filter: brightness(1.08); }
+#catalog-detail .detail-actions button.success {
+  background: var(--c-success); color: white; border-color: var(--c-success);
+}
+#catalog-detail .detail-section {
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--c-divider);
+}
+#catalog-detail .detail-section h4 {
+  font-size: var(--t-xs); text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--c-text-soft); margin: 0 0 var(--s-2);
+}
+#catalog-detail .annot-row {
+  display: grid; grid-template-columns: 50px 70px 1fr auto;
+  gap: 6px; padding: 4px 6px;
+  font-size: var(--t-xs); font-family: var(--f-mono);
+  border-radius: var(--r-sm);
+  align-items: center;
+}
+#catalog-detail .annot-row:hover { background: var(--c-surface-2); }
+#catalog-detail .annot-row .pg { color: var(--c-text-soft); }
+#catalog-detail .annot-row .type {
+  background: var(--c-bg-soft); padding: 1px 5px; border-radius: 3px;
+  text-align: center; color: var(--c-text-soft);
+}
+#catalog-detail .annot-row .contents { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#catalog-detail .annot-row button {
+  padding: 2px 6px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--c-border); border-radius: 3px;
+  background: var(--c-surface); color: var(--c-danger-text);
+}
+#catalog-detail .links-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 4px 0;
+  font-size: var(--t-xs);
+}
+#catalog-detail .links-row .row-num {
+  font-family: var(--f-mono); font-weight: 600;
+  background: var(--c-primary-soft); color: var(--c-primary);
+  padding: 1px 6px; border-radius: 3px; cursor: pointer;
+}
+#catalog-detail .links-row .row-num:hover { filter: brightness(1.08); }
 
 /* ── Catalog pane ───────────────────────────────────────────────── */
 .pdf-pane > h2 { gap: var(--s-4); }
@@ -8374,6 +8735,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
   <aside class="activity-rail" role="navigation" aria-label="primary navigation">
     <button class="rail-btn active" data-panel="tree" onclick="setRailPanel('tree')" title="Row tree" aria-label="row tree"><svg class="ico" aria-hidden="true"><use href="#i-folder"/></svg></button>
     <button class="rail-btn" data-panel="search" onclick="openCmdK()" title="Search · ⌘K" aria-label="search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <button class="rail-btn" data-panel="catalogs" onclick="openCatalogBrowser()" title="Catalog library" aria-label="catalogs"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg></button>
     <button class="rail-btn" data-panel="learn" onclick="setRailPanel('learn')" title="Learning patterns" aria-label="learn"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg></button>
     <button class="rail-btn" data-panel="versions" onclick="setRailPanel('versions')" title="Project versions" aria-label="versions"><svg class="ico" aria-hidden="true"><use href="#i-package"/></svg></button>
     <button class="rail-btn" data-panel="audit" onclick="setRailPanel('audit')" title="Database & audit" aria-label="audit"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg></button>
@@ -9003,6 +9365,37 @@ body[data-embedded="1"] .kbd-help { display: none; }
   </div>
   <div class="ab-bottom">
     <textarea id="ab-notes" placeholder="บันทึก / Notes…" oninput="saveNotesDebounced()" aria-label="row notes"></textarea>
+  </div>
+</div>
+
+<!-- ──────────── Phase 2: Catalog browser modal ──────────── -->
+<div class="modal-bg" id="catalog-modal" role="dialog" aria-modal="true" aria-labelledby="catalog-modal-title" onclick="if(event.target.id==='catalog-modal') closeCatalogBrowser()">
+  <div class="modal" id="catalog-modal-inner" style="max-width:1100px;width:96vw;height:88vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h3 id="catalog-modal-title" style="margin:0;display:flex;align-items:center;gap:8px">
+        <svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>
+        <span>Catalog Library</span>
+        <span id="catalog-stats-pill" style="margin-left:6px;font-weight:500;font-size:var(--t-xs);color:var(--c-text-soft);background:var(--c-bg-soft);padding:2px 8px;border-radius:999px">loading…</span>
+      </h3>
+      <button class="modal-close" onclick="closeCatalogBrowser()" aria-label="close">✕</button>
+    </div>
+    <div style="display:flex;gap:var(--s-3);padding:var(--s-3) var(--s-5);border-bottom:1px solid var(--c-divider);flex-shrink:0">
+      <input type="search" id="catalog-search" placeholder="ค้น brand / model / section / filename…" style="flex:1;padding:6px 10px;border:1px solid var(--c-border);border-radius:var(--r-md);font-size:var(--t-sm)" oninput="catalogSearchDebounced()">
+      <select id="catalog-section-filter" onchange="catalogReload()" style="padding:6px 10px;border:1px solid var(--c-border);border-radius:var(--r-md);font-size:var(--t-sm)">
+        <option value="">All sections</option>
+      </select>
+      <button class="btn" onclick="catalogReingest()" title="Re-scan output/ for new PDFs"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Re-scan</span></button>
+    </div>
+    <div style="flex:1;overflow:hidden;display:grid;grid-template-columns: 380px 1fr;gap:0;min-height:0">
+      <!-- LEFT: list -->
+      <div id="catalog-list" style="overflow-y:auto;border-right:1px solid var(--c-divider);padding:var(--s-2);min-height:0">
+        <div style="padding:20px;color:var(--c-text-faint);text-align:center">loading…</div>
+      </div>
+      <!-- RIGHT: detail -->
+      <div id="catalog-detail" style="overflow-y:auto;padding:var(--s-5);min-height:0">
+        <div style="padding:40px;color:var(--c-text-faint);text-align:center;font-style:italic">เลือก catalog จาก list ด้านซ้าย</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -12119,6 +12512,236 @@ function closeAudit() {
   document.getElementById('audit-modal').classList.remove('show');
 }
 
+// ── Phase 2: Catalog browser ──────────────────────────────────────
+let _CAT_SEL = null;        // selected catalog in detail pane
+let _CAT_TIMER = 0;
+let _CAT_LIST = [];
+
+function openCatalogBrowser() {
+  document.getElementById('catalog-modal').classList.add('show');
+  catalogReload();
+  catalogPopulateSectionFilter();
+}
+function closeCatalogBrowser() {
+  document.getElementById('catalog-modal').classList.remove('show');
+}
+function catalogSearchDebounced() {
+  if (_CAT_TIMER) clearTimeout(_CAT_TIMER);
+  _CAT_TIMER = setTimeout(catalogReload, 200);
+}
+async function catalogReload() {
+  const list = document.getElementById('catalog-list');
+  if (!list) return;
+  list.innerHTML = '<div style="padding:20px;color:var(--c-text-faint);text-align:center">loading…</div>';
+  const q = document.getElementById('catalog-search').value.trim();
+  const sec = document.getElementById('catalog-section-filter').value;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (sec) params.set('section', sec);
+  params.set('limit', '300');
+  try {
+    const r = await fetch(`/api/catalogs?${params.toString()}`);
+    const j = await r.json();
+    _CAT_LIST = j.items || [];
+    catalogRenderList();
+    catalogLoadStats();
+  } catch (e) {
+    list.innerHTML = `<div style="padding:20px;color:var(--c-danger-text);text-align:center">load error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+async function catalogLoadStats() {
+  try {
+    const r = await fetch('/api/catalogs/stats');
+    const j = await r.json();
+    const pill = document.getElementById('catalog-stats-pill');
+    if (pill) pill.textContent = `${j.catalogs} catalogs · ${j.companies} co · ${j.projects} proj · ${j.row_links} bound`;
+  } catch (e) {}
+}
+async function catalogPopulateSectionFilter() {
+  const sel = document.getElementById('catalog-section-filter');
+  if (!sel || sel.children.length > 1) return;  // already populated
+  // Cheap: reuse data we already have if possible
+  try {
+    const r = await fetch('/api/catalogs?limit=500');
+    const j = await r.json();
+    const sections = [...new Set((j.items || []).map(c => c.section_hint).filter(Boolean))].sort();
+    for (const s of sections) {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s;
+      sel.appendChild(opt);
+    }
+  } catch (e) {}
+}
+function catalogRenderList() {
+  const list = document.getElementById('catalog-list');
+  if (!_CAT_LIST.length) {
+    list.innerHTML = '<div style="padding:20px;color:var(--c-text-faint);text-align:center">No catalogs match.</div>';
+    return;
+  }
+  list.innerHTML = _CAT_LIST.map(c => {
+    const active = (_CAT_SEL && c.catalog_id === _CAT_SEL) ? ' active' : '';
+    const filename = (c.pdf_rel || '').split('/').pop();
+    return `<div class="cat-item${active}" data-id="${c.catalog_id}" onclick="catalogSelect(${c.catalog_id})">
+      <div class="cat-head">
+        ${c.section_hint ? `<span class="cat-section">${escapeHtml(c.section_hint)}</span>` : ''}
+        <span class="cat-brand">${escapeHtml(c.brand || '—')}</span>
+        <span class="cat-model">${escapeHtml(c.model || '')}</span>
+        <span class="cat-pages">p.${c.pages || '?'}</span>
+      </div>
+      <div class="cat-rel">${escapeHtml(filename)}</div>
+    </div>`;
+  }).join('');
+}
+async function catalogSelect(catalog_id) {
+  _CAT_SEL = catalog_id;
+  document.querySelectorAll('#catalog-list .cat-item').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.id) === catalog_id);
+  });
+  const detail = document.getElementById('catalog-detail');
+  detail.innerHTML = '<div style="padding:20px;color:var(--c-text-faint)">loading…</div>';
+  try {
+    const r = await fetch(`/api/catalogs/${catalog_id}`);
+    const j = await r.json();
+    if (!j.ok) {
+      detail.innerHTML = `<div style="color:var(--c-danger-text)">${escapeHtml(j.error || 'load failed')}</div>`;
+      return;
+    }
+    const links_r = await fetch(`/api/catalogs/${catalog_id}/links`);
+    const links_j = await links_r.json();
+    catalogRenderDetail(j.catalog, links_j.links || []);
+  } catch (e) {
+    detail.innerHTML = `<div style="color:var(--c-danger-text)">error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+function catalogRenderDetail(c, links) {
+  const detail = document.getElementById('catalog-detail');
+  const filename = (c.pdf_rel || '').split('/').pop();
+  detail.innerHTML = `
+    <h3>
+      ${c.section_hint ? `<span class="cat-section-pill">${escapeHtml(c.section_hint)}</span>` : ''}
+      <span style="font-family:var(--f-mono);font-size:var(--t-sm);color:var(--c-text-soft)">${escapeHtml(filename)}</span>
+    </h3>
+    <div style="font-size:var(--t-xs);color:var(--c-text-faint);margin-bottom:var(--s-3);font-family:var(--f-mono);word-break:break-all">${escapeHtml(c.pdf_rel || '')}</div>
+
+    <div class="meta-grid">
+      <label>Brand</label>
+      <input id="cat-edit-brand" value="${escapeHtml(c.brand || '')}" placeholder="e.g. Lenovo">
+      <label>Model</label>
+      <input id="cat-edit-model" value="${escapeHtml(c.model || '')}" placeholder="e.g. ThinkSystem SR630">
+      <label>Category</label>
+      <input id="cat-edit-category" value="${escapeHtml(c.category || '')}" placeholder="e.g. Server / Switch / Rack">
+      <label>Section</label>
+      <input id="cat-edit-section" value="${escapeHtml(c.section_hint || '')}" placeholder="e.g. 5.1.1.2">
+      <label>Description</label>
+      <textarea id="cat-edit-desc" placeholder="vendor specs / notes">${escapeHtml(c.description || '')}</textarea>
+    </div>
+
+    <div class="detail-actions">
+      <button class="primary" onclick="catalogSaveMeta(${c.catalog_id})">${ico('save', 13)}<span>Save metadata</span></button>
+      ${SELECTED_ROW ? `<button class="success" onclick="catalogApplyToRow(${c.catalog_id})">${ico('check', 13)}<span>Apply to R${SELECTED_ROW}</span></button>` : `<button disabled title="select a row first">${ico('check', 13)}<span>Apply to row…</span></button>`}
+      <button onclick="catalogOpenPdf('${escapeHtml(c.pdf_rel || '')}')">${ico('eye', 13)}<span>Open PDF</span></button>
+    </div>
+
+    <div class="detail-section">
+      <h4>Annotations (DB-stored, per page)</h4>
+      ${(c.annotations || []).length ? c.annotations.map(a => `
+        <div class="annot-row">
+          <span class="pg">p.${a.page}</span>
+          <span class="type">${escapeHtml(a.type)}</span>
+          <span class="contents" title="${escapeHtml(a.contents || '')}">${escapeHtml(a.contents || '(no text)')}</span>
+          <button onclick="catalogDeleteAnnot(${c.catalog_id}, ${a.annot_id})" title="Delete">×</button>
+        </div>`).join('') : '<div style="font-size:var(--t-xs);color:var(--c-text-faint);font-style:italic;padding:4px 8px">No DB-stored annotations yet. (Existing annotations are baked into the PDF and edited via the row edit flow.)</div>'}
+    </div>
+
+    <div class="detail-section">
+      <h4>Used by (${links.length} row${links.length === 1 ? '' : 's'})</h4>
+      ${links.length ? links.map(l => `
+        <div class="links-row">
+          <span class="row-num" onclick="closeCatalogBrowser();selectRow(${l.row_num})" title="Jump to row">R${l.row_num}</span>
+          <span style="color:var(--c-text-soft)">${escapeHtml(l.project_name || '')}</span>
+          <span style="color:var(--c-text-faint);font-family:var(--f-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml((l.col_d_text || '').slice(0, 80))}</span>
+        </div>`).join('') : '<div style="font-size:var(--t-xs);color:var(--c-text-faint);font-style:italic;padding:4px 8px">Not yet bound to any row.</div>'}
+    </div>`;
+}
+async function catalogSaveMeta(catalog_id) {
+  const body = {
+    brand: document.getElementById('cat-edit-brand').value.trim() || null,
+    model: document.getElementById('cat-edit-model').value.trim() || null,
+    category: document.getElementById('cat-edit-category').value.trim() || null,
+    section_hint: document.getElementById('cat-edit-section').value.trim() || null,
+    description: document.getElementById('cat-edit-desc').value.trim() || null,
+  };
+  try {
+    const r = await fetch(`/api/catalogs/${catalog_id}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Saved', `Catalog #${catalog_id} metadata updated`, 'learn', 2500);
+      catalogReload();         // refresh list (filter / sort may change)
+      catalogSelect(catalog_id);
+    } else {
+      toast('Save failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) { toast('Save error', e.message, 'error', 4000); }
+}
+async function catalogApplyToRow(catalog_id) {
+  if (!SELECTED_ROW) { toast('Pick a row first', '', 'warn', 2500); return; }
+  const page = prompt(`หน้าใน catalog ที่ row R${SELECTED_ROW} อ้างอิง? (เว้นว่าง = ไม่ระบุหน้า)`);
+  // user cancelled
+  if (page === null) return;
+  const pageN = page.trim() ? parseInt(page) : null;
+  try {
+    const r = await fetch('/api/row/apply_catalog', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({row: SELECTED_ROW, catalog_id, page: pageN}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast(`✓ Applied`, `R${SELECTED_ROW} → ${(j.col_d || '').slice(0, 40)}`, 'learn', 4000);
+      closeCatalogBrowser();
+      // Refresh xlsx + tree to show new Col D
+      if (typeof loadXlsx === 'function' && SELECTED_ROW) loadXlsx(SELECTED_ROW);
+      const idx = await fetch('/api/index').then(r => r.json());
+      DATA = idx;
+      ROWS_BY_NUM = Object.fromEntries(idx.rows.map(r => [r.row, r]));
+      if (typeof renderTree === 'function') renderTree();
+      if (typeof tickRetrain === 'function') tickRetrain('apply_catalog');
+    } else {
+      toast('Apply failed', j.error || 'unknown', 'error', 4500);
+    }
+  } catch (e) { toast('Apply error', e.message, 'error', 4500); }
+}
+async function catalogDeleteAnnot(catalog_id, annot_id) {
+  if (!confirm(`Delete annotation #${annot_id}?`)) return;
+  try {
+    await fetch(`/api/catalogs/${catalog_id}/annotations/${annot_id}`,
+                {method: 'DELETE'});
+    catalogSelect(catalog_id);
+  } catch (e) { toast('Delete error', e.message, 'error', 3000); }
+}
+function catalogOpenPdf(pdf_rel) {
+  // Open the PDF in a new tab (uses existing /api/raw_pdf)
+  if (!pdf_rel) return;
+  window.open(`/api/raw_pdf?rel=${encodeURIComponent(pdf_rel)}`, '_blank');
+}
+async function catalogReingest() {
+  toast('Re-scanning…', 'reading output/ for new PDFs', 'info', 2000);
+  try {
+    const r = await fetch('/api/catalogs/reingest', {method: 'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Re-scan done',
+            `${j.scanned} PDFs (${j.inserted} new, ${j.updated} updated, ${j.skipped} unchanged)`,
+            'learn', 4000);
+      catalogReload();
+    } else {
+      toast('Re-scan failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) { toast('Re-scan error', e.message, 'error', 4000); }
+}
+
 async function loadAuditStats() {
   const r = await fetch('/api/db/stats');
   const j = await r.json();
@@ -13910,6 +14533,29 @@ def boot() -> None:
     # Mirror everything into the DB so queries can hit it instead of the
     # in-memory caches.
     sync_db_from_memory()
+
+    # Phase 2: catalog library bootstrap (idempotent)
+    # Ensure default company + active project exist so row_catalog_links
+    # has a project_id to point at, then ingest output/ PDFs as catalogs.
+    try:
+        cm_id = catalog.upsert_company(name="Smart Solution", code="SMART")
+        proj = catalog.get_active_project()
+        if not proj:
+            pid = catalog.upsert_project(
+                company_id=cm_id, name="Smart Plant 1", code="SP1",
+                xlsx_rel=str(XLSX_PATH.relative_to(ROOT)),
+                output_rel=str(OUTPUT.relative_to(ROOT)),
+            )
+            catalog.set_active_project(pid)
+            proj = catalog.get_active_project()
+        result = catalog.ingest_output_dir(OUTPUT)
+        if result.get("ok"):
+            print(f"[boot] catalog library: {result['scanned']} PDFs scanned "
+                  f"({result['inserted']} new, {result['updated']} updated, "
+                  f"{result['skipped']} unchanged) · "
+                  f"active project={proj.get('name') if proj else '?'}")
+    except Exception as e:
+        sys.stderr.write(f"[boot] catalog ingest failed: {e}\n")
 
     # Load .env file (if present) so ANTHROPIC_API_KEY etc. are available
     _load_dotenv(ROOT / ".env")
