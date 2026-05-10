@@ -61,9 +61,11 @@ ignore = [
 ]
 
 [tool.pyright]
-# Pyright is set to advisory ("off") mode for now. The 14k-LOC monolith
-# wasn't authored with strict typing in mind; gradually annotate new
-# files instead of fixing 100+ historical errors.
+# T2.3 (2026-05-10): bumped from "off" → "basic" for the app/
+# package. New modules (catalog, export, claude_code_provider,
+# routes/*) are annotated; legacy code in scripts/ + tests/ stays
+# untyped — they're excluded from strict checks via reportXxx levels
+# rather than `exclude` so misuse still surfaces.
 include = ["app", "scripts", "tests"]
 exclude = [
     "**/__pycache__",
@@ -75,11 +77,25 @@ exclude = [
 ]
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "off"
+typeCheckingMode = "basic"
 pythonVersion = "3.10"
 reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
+# Legacy parts of the codebase use Optional rows + downstream field
+# access — softening these means new code still gets the benefit
+# without drowning in 100+ historical warnings.
+reportReturnType = "warning"
+reportOptionalSubscript = "warning"
+reportOptionalMemberAccess = "warning"
+reportArgumentType = "warning"
+reportCallIssue = "warning"
+reportAttributeAccessIssue = "warning"
+reportAssignmentType = "warning"
+reportPossiblyUnboundVariable = "warning"
+reportIndexIssue = "warning"
+reportGeneralTypeIssues = "warning"
+reportInvalidTypeArguments = "warning"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

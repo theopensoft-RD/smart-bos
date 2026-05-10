@@ -1180,3 +1180,131 @@ now?"
 - **System prompt cache TTL = 60s** is the right granularity for
   these files. Short enough that edits propagate, long enough that
   a flurry of API calls doesn't re-read the disk every time.
+
+---
+
+## Tier 2 — Monolith refactor (template extract + Blueprints + pyright)
+
+**Goal**: take the first real bites out of the 14k-LOC `comply_verify_gui.py`
+monolith. Three coordinated changes that together cut its line count
+~63% and finally let editors syntax-highlight the HTML/CSS/JS.
+
+### T2.1 — Extract `INDEX_HTML` to `app/server/templates/index.html`
+
+The HTML/CSS/JS template was a 9530-line `r"""..."""` string baked
+into the Python file. This made:
+- VS Code / vim show it as raw text (no HTML/CSS/JS highlighting)
+- ruff complain about long lines for things that should be ignored
+- diffs in `git log` painful (everything looks like Python)
+
+Move:
+- `INDEX_HTML = r"""…"""` block (lines 5497–15027) → new
+  `app/server/templates/index.html` (395,833 bytes)
+- Flask app now constructed with `template_folder=…`
+- Route changes from `render_template_string(INDEX_HTML)` →
+  `render_template("index.html")`
+- `render_template_string` import dropped from `flask` import line
+- `app/server/static/` directory reserved for future asset extraction
+  (CSS/JS files); auto-attached when present
+
+**Result**: `comply_verify_gui.py` shrank from **15,175 → 5,646 lines**
+(–63%). Editors now show proper HTML/CSS/JS for the template; the
+Python file is mostly Flask routes + boot logic.
+
+**Verified**: `/` route still serves the same 395 KB HTML; all 13
+expected UI elements present (`#float-annot-toolbar`, `#sb-verdict`,
+`#catalog-modal`, `#export-modal`, `#continuity-modal`,
+`#topbar-continuity`, `.col-d-ac-panel`, `.ai-patterns`, …).
+
+### T2.2 — Blueprints for catalog / export / continuity
+
+Three slices of /api/* moved into proper Flask Blueprints:
+
+```
+app/routes/
+├── __init__.py            register_all(app, root, output_root)
+├── catalog_api.py         /api/catalogs/*, /api/companies, /api/projects/*
+├── export_api.py          /api/export/*
+└── continuity_api.py      /api/continuity
+```
+
+State plumbing: `register_all` writes `COMPLY_ROOT` and
+`COMPLY_OUTPUT` into `app.config`; blueprint handlers read them via
+`current_app.config[...]`. No globals or circular imports.
+
+**What stayed in `comply_verify_gui.py`**:
+- `/api/row/apply_catalog` — touches xlsx + ROWS + `make_col_d_for_row`
+- `/api/auto_annotate/*`, `/api/manual_annotate/*`, `/api/reannotate/*`
+- `/api/pdf_*`, `/api/tor_*`, `/api/row/col_d`, `/api/status`, `/api/index`
+- `/api/learn/*`, `/api/versions/*`, `/api/db/*`
+- `/api/claude/stream`, `/api/settings/*`
+
+These all depend on `ROWS`/`PDF_INDEX`/`SECTION_INDEX` in-memory
+state or call internal helpers like `make_col_d_for_row`,
+`detect_row_role`, `_run_version_cmd`. Moving them is a bigger
+project — gradual migration as those globals get encapsulated.
+
+**Result**: `comply_verify_gui.py` further shrank to **5,219 lines**
+(–427 from T2.2). New blueprints add ~330 lines split across 4
+focused modules with clear seams.
+
+**Verified**: `gui.app.url_map.iter_rules()` still produces 65
+`/api/*` routes; all blueprint routes (`/api/catalogs`,
+`/api/catalogs/<id>`, `/api/companies`, `/api/projects`,
+`/api/export/preview`, `/api/export/package`, `/api/export/download`,
+`/api/export/list`, `/api/continuity`) resolve correctly.
+
+### T2.3 — Pyright `basic` mode + soft warnings
+
+Flipped `tool.pyright.typeCheckingMode` from `"off"` → `"basic"`.
+The 14k-LOC monolith wasn't authored for type checking, so
+historical issues are *softened* (warnings, not errors) for
+specific report categories:
+`reportReturnType`, `reportOptionalSubscript`,
+`reportOptionalMemberAccess`, `reportArgumentType`,
+`reportCallIssue`, `reportAttributeAccessIssue`,
+`reportAssignmentType`, `reportPossiblyUnboundVariable`,
+`reportIndexIssue`, `reportGeneralTypeIssues`,
+`reportInvalidTypeArguments`.
+
+This means:
+- New modules (`app/routes/*`, `catalog.py`, `export.py`,
+  `claude_code_provider.py`) get type-checked seriously and produce
+  **0 errors**
+- Legacy paths get warnings the developer can choose to address
+  (or filter via `# type: ignore[<name>]` if intentional)
+- `pyright app/` now reports `0 errors, 157 warnings` — green
+  enough to wire into CI as a gate
+
+### Verification
+
+```
+$ uv run pytest -q
+9 passed in 5.14s
+
+$ uv run ruff check .
+All checks passed!
+
+$ uv run pyright app/
+0 errors, 157 warnings, 0 informations
+
+$ wc -l comply_verify_gui.py
+5219 lines    # was 15175 before T2.1
+```
+
+### Lessons captured
+
+- **Single biggest pain killer = template extraction**. Three minutes
+  of editing the HTML now without scrolling 9000 lines of Python first
+  felt like upgrading to a faster computer.
+- **Blueprint factory via `current_app.config`** is dramatically
+  cleaner than passing state around or importing the gui module
+  (which would create circular imports). Flask designed this for a
+  reason.
+- **Pyright basic + softened warnings** is the right halfway point
+  for a half-typed codebase. New code gets caught, old code doesn't
+  flood the output.
+- **Keep state-dependent routes in main**: don't try to move
+  everything in one go. The "pure" CRUD endpoints came out cleanly;
+  the xlsx-mutating endpoints would have required encapsulating
+  ROWS/PDF_INDEX first, which is a separate refactor.

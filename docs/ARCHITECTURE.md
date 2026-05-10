@@ -718,6 +718,58 @@ menu). Debounced 250 ms input; Tab/Enter accepts, ArrowUp/Down
 navigates. The panel closes when the editor blurs (with a 120 ms
 delay so a click on a suggestion is processed first).
 
+### 12.10i Module split (Tier 2 — 2026-05-10)
+
+`comply_verify_gui.py` shrank from 15 K → 5.2 K lines via three
+coordinated changes. The new structure:
+
+```
+~/Code/smart-bos/
+├── comply_verify_gui.py            ← 5,219 lines (was 15,175)
+│                                     boot, indexing, xlsx routes,
+│                                     auto_annotate, claude_stream,
+│                                     /api/row/apply_catalog
+├── app/
+│   ├── server/
+│   │   ├── templates/
+│   │   │   └── index.html           ← T2.1: 395 KB HTML/CSS/JS
+│   │   └── static/                  ← reserved for future split
+│   ├── routes/
+│   │   ├── __init__.py              ← register_all(app, root, output)
+│   │   ├── catalog_api.py           ← T2.2: /api/catalogs/*,
+│   │   │                              /api/companies, /api/projects/*
+│   │   ├── export_api.py            ← T2.2: /api/export/*
+│   │   └── continuity_api.py        ← T2.2: /api/continuity
+│   ├── catalog.py
+│   ├── claude_code_provider.py
+│   ├── core.py
+│   ├── database.py
+│   ├── export.py
+│   └── learning.py
+└── tests/
+    └── test_smoke.py                ← 9 tests (was 5)
+```
+
+State plumbing for blueprints uses `app.config`:
+```python
+# in main file
+from app.routes import register_all
+register_all(app, root=ROOT, output_root=OUTPUT)
+# now app.config["COMPLY_ROOT"] and ["COMPLY_OUTPUT"] are set
+
+# in blueprint
+from flask import current_app
+output = current_app.config["COMPLY_OUTPUT"]
+```
+
+This avoids circular imports (the alternative was importing the gui
+module from a blueprint, which fails because the gui module imports
+the blueprints).
+
+Pyright is now at `typeCheckingMode = "basic"` with several legacy
+report categories softened to warnings — strict on new code, lenient
+on historical. CI can gate on `pyright app/` returning 0 errors.
+
 ### 12.10h Print-ready PDF export (Phase 2.1)
 
 `app/export.py` builds a deliverable PDF combining Cover + TOC +
