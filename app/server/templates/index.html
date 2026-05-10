@@ -4966,6 +4966,18 @@ body[data-ux-mode="calm"] .calm-mode-hint { display: block; }
         <h4 style="margin:0 0 var(--s-2);font-size:var(--t-xs);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-text-soft)">Switch project</h4>
         <div id="ps-projects" style="display:flex;flex-direction:column;gap:4px;font-size:var(--t-sm)">loading…</div>
       </div>
+      <!-- v3 (2026-05-10): submissions = bidder/consortium responses
+            for the active project (TRIO_SR_Solution / Take_IT / etc) -->
+      <div>
+        <h4 style="margin:0 0 var(--s-2);font-size:var(--t-xs);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-text-soft);display:flex;align-items:center;gap:6px">
+          Submissions (bidders for active project)
+          <button class="btn" onclick="psDiscoverSubmissions()" title="Re-scan output/ subdirs for new submission folders" style="margin-left:auto;font-size:11px;padding:2px 8px">↻ Re-scan</button>
+        </h4>
+        <div id="ps-submissions" style="display:flex;flex-direction:column;gap:4px;font-size:var(--t-sm)">loading…</div>
+        <div style="font-size:var(--t-xs);color:var(--c-text-faint);margin-top:4px;font-style:italic">
+          Switching reloads xlsx + ROWS for that submission (TRIO and Take_IT have different Col C/D values)
+        </div>
+      </div>
       <details>
         <summary style="cursor:pointer;font-size:var(--t-sm);color:var(--c-text-soft);font-weight:600">+ เพิ่ม company / project ใหม่</summary>
         <div style="margin-top:var(--s-3);display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-3);border:1px dashed var(--c-border);border-radius:var(--r-md)">
@@ -8959,20 +8971,24 @@ async function exportLoadRecent() {
   } catch (e) { box.innerHTML = `<span style="color:var(--c-danger-text)">${escapeHtml(e.message)}</span>`; }
 }
 
-// ── UX-1: Multi-company / project switcher ─────────────────────
+// ── UX-1: Multi-company / project / SUBMISSION switcher ────────
 async function loadProjectSwitcherBadge() {
   try {
-    const r = await fetch('/api/projects');
-    const j = await r.json();
+    const [pr, sub] = await Promise.all([
+      fetch('/api/projects').then(r => r.json()),
+      fetch('/api/submissions').then(r => r.json()).catch(() => ({})),
+    ]);
     const badge = document.getElementById('topbar-project');
     const label = document.getElementById('topbar-project-label');
     if (!badge || !label) return;
-    if (j.active) {
+    if (pr.active) {
       badge.style.display = '';
-      const co = j.active.company_code || j.active.company_name || '';
-      const pr = j.active.code || j.active.name || '';
-      label.textContent = `${co} · ${pr}`;
-      badge.title = `${j.active.company_name} → ${j.active.name} · ${(j.items || []).length} project(s) total`;
+      const proj_label = pr.active.code || pr.active.name || '';
+      const sub_label = sub.active ? (sub.active.code || sub.active.name) : '';
+      label.textContent = sub_label ? `${proj_label} · ${sub_label}` : proj_label;
+      const subs_total = (sub.items || []).length;
+      badge.title = `${pr.active.name}${sub.active ? ' → ' + sub.active.name : ''}`
+                  + (subs_total > 1 ? ` · ${subs_total} submissions (click to switch)` : '');
     } else {
       badge.style.display = 'none';
     }
@@ -8989,18 +9005,23 @@ async function psRefresh() {
   // Active
   const active = document.getElementById('ps-active');
   const projs = document.getElementById('ps-projects');
+  const subs  = document.getElementById('ps-submissions');
   active.textContent = 'loading…';
   projs.textContent = 'loading…';
+  if (subs) subs.textContent = 'loading…';
   try {
-    const [pr, co] = await Promise.all([
+    const [pr, co, sub] = await Promise.all([
       fetch('/api/projects').then(r => r.json()),
       fetch('/api/companies').then(r => r.json()),
+      fetch('/api/submissions').then(r => r.json()).catch(() => ({items: [], active: null})),
     ]);
     if (pr.active) {
+      const sub_label = sub.active ? `<div style="color:var(--c-primary-text);margin-top:4px;font-size:var(--t-xs)">▸ Active submission: <strong>${escapeHtml(sub.active.name)}</strong></div>` : '';
       active.innerHTML = `
         <div style="font-weight:600">${escapeHtml(pr.active.name || '?')}</div>
         <div style="color:var(--c-text-soft);margin-top:2px">${escapeHtml(pr.active.company_name || '')} · ${escapeHtml(pr.active.code || '—')}</div>
-        <div style="color:var(--c-text-faint);font-size:var(--t-xs);margin-top:6px;font-family:var(--f-mono)">xlsx: ${escapeHtml(pr.active.xlsx_rel || '?')}</div>
+        <div style="color:var(--c-text-faint);font-size:var(--t-xs);margin-top:6px;font-family:var(--f-mono)">xlsx: ${escapeHtml((sub.active && sub.active.xlsx_rel) || pr.active.xlsx_rel || '?')}</div>
+        ${sub_label}
       `;
     } else {
       active.innerHTML = '<span style="color:var(--c-text-faint)">No active project</span>';
@@ -9020,6 +9041,27 @@ async function psRefresh() {
         </button>`;
       }).join('');
     }
+
+    // Submissions list
+    if (subs) {
+      const subItems = sub.items || [];
+      if (!subItems.length) {
+        subs.innerHTML = '<span style="color:var(--c-text-faint)">no submissions found — drop a "Comply spec*.xlsx" into output/<subdir>/ then ↻ Re-scan</span>';
+      } else {
+        subs.innerHTML = subItems.map(s => {
+          const isActive = sub.active && s.submission_id === sub.active.submission_id;
+          return `<button class="ps-sub-row${isActive ? ' active' : ''}" onclick="psActivateSubmission(${s.submission_id})" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--c-border);border-radius:var(--r-sm);background:${isActive ? 'var(--c-primary-soft)' : 'var(--c-surface)'};color:var(--c-text);text-align:left;cursor:pointer">
+            <span style="flex:1">
+              <strong>${escapeHtml(s.name)}</strong>
+              <span style="color:var(--c-text-soft);font-size:var(--t-xs);margin-left:6px;font-family:var(--f-mono)">${escapeHtml(s.code || '')}</span>
+              <span style="display:block;color:var(--c-text-faint);font-size:11px;margin-top:2px;font-family:var(--f-mono)">${escapeHtml(s.xlsx_rel || '')}</span>
+            </span>
+            ${isActive ? '<span style="background:var(--c-primary);color:white;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600">ACTIVE</span>' : '<span style="color:var(--c-text-faint);font-size:var(--t-xs)">click to switch</span>'}
+          </button>`;
+        }).join('');
+      }
+    }
+
     // Populate company dropdown for new project
     const psCo = document.getElementById('ps-new-pr-co');
     if (psCo) {
@@ -9029,6 +9071,42 @@ async function psRefresh() {
   } catch (e) {
     active.innerHTML = `<span style="color:var(--c-danger-text)">error: ${escapeHtml(e.message)}</span>`;
   }
+}
+
+async function psActivateSubmission(submission_id) {
+  try {
+    const r = await fetch(`/api/submissions/${submission_id}/activate`,
+                          {method: 'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Switched submission',
+            `${j.active?.name || ''} — reloading xlsx`, 'learn', 4000);
+      // Refresh ROWS / tree / xlsx panes from the new submission
+      const idx = await fetch('/api/index').then(r => r.json());
+      DATA = idx;
+      ROWS_BY_NUM = Object.fromEntries(idx.rows.map(r => [r.row, r]));
+      if (typeof renderTree === 'function') renderTree();
+      if (typeof statusBarUpdate === 'function') statusBarUpdate();
+      if (typeof loadProjectSwitcherBadge === 'function') loadProjectSwitcherBadge();
+      psRefresh();
+    } else {
+      toast('Switch failed', j.error || 'unknown', 'error', 4500);
+    }
+  } catch (e) { toast('Switch error', e.message, 'error', 4500); }
+}
+
+async function psDiscoverSubmissions() {
+  toast('Re-scanning…', 'looking for submission subdirs in output/', 'info', 2000);
+  try {
+    const r = await fetch('/api/submissions/discover', {method: 'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Re-scan done', `${j.count} submissions registered`, 'learn', 3000);
+      psRefresh();
+    } else {
+      toast('Re-scan failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) { toast('Re-scan error', e.message, 'error', 4000); }
 }
 async function psActivate(project_id) {
   try {

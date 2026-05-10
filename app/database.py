@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-DB_VERSION = 2  # bumped 2026-05-10: catalogs/companies/projects tables
+DB_VERSION = 3  # bumped 2026-05-10: submissions table (multi-bidder per project)
 
 _DB_PATH: Path | None = None
 
@@ -370,18 +370,54 @@ CREATE INDEX IF NOT EXISTS idx_catalog_annots ON catalog_annotations(catalog_id,
 
 -- Linkage: which catalog (and page) is currently bound to each project row.
 -- Composite PK so each (project, row) has exactly one active link.
+--
+-- 2026-05-10 (v3): the practical scope is per-SUBMISSION, not per-project.
+-- A single project (Smart Plant 1) can have multiple submissions
+-- (TRIO_SR_Solution, Take_IT) where the same row gets DIFFERENT
+-- catalog bindings. The PK is now (submission_id, row_num); the
+-- legacy project_id column stays for backward compat. New writes
+-- always set submission_id; reads should prefer submission_id when
+-- the active submission is set.
 CREATE TABLE IF NOT EXISTS row_catalog_links (
-    project_id   INTEGER NOT NULL,
-    row_num      INTEGER NOT NULL,
-    catalog_id   INTEGER NOT NULL,
-    page         INTEGER,                        -- which page anchors this row
-    col_d_text   TEXT,                            -- generated Col D string
-    bound_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    project_id     INTEGER NOT NULL,
+    row_num        INTEGER NOT NULL,
+    catalog_id     INTEGER NOT NULL,
+    page           INTEGER,                       -- which page anchors this row
+    col_d_text     TEXT,                           -- generated Col D string
+    bound_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    submission_id  INTEGER,                        -- NEW v3: per-bidder scope
     PRIMARY KEY (project_id, row_num),
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
     FOREIGN KEY (catalog_id) REFERENCES catalogs(catalog_id)
 );
 CREATE INDEX IF NOT EXISTS idx_row_links_catalog ON row_catalog_links(catalog_id);
+CREATE INDEX IF NOT EXISTS idx_row_links_submission ON row_catalog_links(submission_id);
+
+-- Submissions (NEW v3, 2026-05-10) ──────────────────────────────────
+-- A "submission" is a specific bidder/consortium's response to a
+-- project's TOR. Same project, multiple submissions = multiple
+-- vendor proposals — each with its own xlsx + catalog bindings.
+-- E.g.: Smart Plant 1 has TRIO_SR_Solution and Take_IT submissions.
+--
+-- Each submission lives in a subdirectory of output/ with its own
+-- "Comply spec*.xlsx" file. Auto-discovered at boot.
+
+CREATE TABLE IF NOT EXISTS submissions (
+    submission_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id     INTEGER NOT NULL,
+    name           TEXT NOT NULL,                 -- "TRIO_SR_Solution"
+    code           TEXT,                           -- "TRIO" (slug for display)
+    output_subdir  TEXT NOT NULL,                  -- "TRIO_SR_Solution" relative to output/
+    xlsx_rel       TEXT NOT NULL,                  -- "TRIO_SR_Solution/Comply spec ... TRIO.xlsx"
+    is_active      INTEGER NOT NULL DEFAULT 0,     -- exactly 1 active per project
+    notes          TEXT,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+    UNIQUE (project_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_project ON submissions(project_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_active ON submissions(is_active);
 """
 
 
@@ -395,6 +431,24 @@ def init_db(db_path: str | Path) -> None:
     _DB_PATH = Path(db_path)
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect() as c:
+        # ── Pre-migrate v2 → v3 BEFORE executescript ─────────────────
+        # CREATE INDEX in SCHEMA references row_catalog_links.submission_id
+        # which doesn't exist on a v2-era DB. Add the column first so the
+        # CREATE INDEX inside executescript() succeeds.
+        try:
+            tbl = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='row_catalog_links'").fetchone()
+            if tbl:
+                cols = {r["name"] for r in c.execute(
+                    "PRAGMA table_info(row_catalog_links)")}
+                if "submission_id" not in cols:
+                    c.execute(
+                        "ALTER TABLE row_catalog_links "
+                        "ADD COLUMN submission_id INTEGER")
+        except Exception:
+            pass
+
         c.executescript(SCHEMA)
         c.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
                   (DB_VERSION,))

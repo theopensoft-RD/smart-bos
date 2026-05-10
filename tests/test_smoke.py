@@ -237,6 +237,38 @@ def test_phase_c_empty_patch_bumps_updated_at(client, gui):
     assert r.get_json().get("ok") is True
 
 
+def test_submissions_discovery_and_switch(client, gui):
+    """v3 (2026-05-10): submissions are auto-discovered from output/
+    subdirs containing a 'Comply spec*.xlsx'. Switching submission
+    reloads ROWS from that submission's xlsx.
+
+    Project Smart Plant 1 has TRIO_SR_Solution + Take_IT submissions.
+    """
+    r = client.get("/api/submissions")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["ok"] is True
+    items = j.get("items", [])
+    # On the developer's machine there should be at least 1 submission
+    # (auto-discovery ran at boot). Skip the test gracefully on empty
+    # data.
+    if not items:
+        return
+    assert j.get("active") is not None
+
+    # Switch to a different submission and verify XLSX_PATH changes
+    if len(items) >= 2:
+        active_id = j["active"]["submission_id"]
+        other = next(s for s in items if s["submission_id"] != active_id)
+        before = gui.XLSX_PATH
+        r = client.post(f"/api/submissions/{other['submission_id']}/activate")
+        assert r.status_code == 200
+        assert r.get_json().get("ok") is True
+        assert gui.XLSX_PATH != before, "XLSX_PATH should swap on activation"
+        # Switch back to keep test idempotent
+        client.post(f"/api/submissions/{active_id}/activate")
+
+
 def test_label_for_row_handles_filename_format(client, gui):
     """R12 case: filename_format rows must produce a usable label.
     Was returning empty/section-only before the dash-form + Col B fallback fix.

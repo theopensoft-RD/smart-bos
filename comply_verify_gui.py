@@ -5193,6 +5193,11 @@ def api_learn_toggle_pattern(pattern_id: int):
 # ---------------------------------------------------------------------------
 
 def boot() -> None:
+    # ``XLSX_PATH`` is module-level but boot() may swap it to the active
+    # submission's xlsx (Phase v3 multi-bidder support). Declared here at
+    # the top of the function so the assignment below isn't ambiguous.
+    global XLSX_PATH
+
     print(f"[boot] root={ROOT}")
 
     # Bring up the SQLite layer first so subsequent index/sync calls have
@@ -5253,6 +5258,26 @@ def boot() -> None:
                   f"{result['skipped']} unchanged"
                   + (f", {sha_skip} fast-skip-by-sha" if sha_skip else "")
                   + f") · active project={proj.get('name') if proj else '?'}")
+
+        # v3 (2026-05-10): auto-discover submissions in output/ subdirs.
+        # Each subdir with a "Comply spec*.xlsx" becomes a submission
+        # (TRIO_SR_Solution, Take_IT, etc). The active submission's
+        # xlsx becomes the working file.
+        if proj:
+            sub_ids = catalog.discover_submissions_in_output(
+                OUTPUT, project_id=int(proj["project_id"]))
+            active_sub = catalog.get_active_submission(
+                project_id=int(proj["project_id"]))
+            if active_sub:
+                # Swap XLSX_PATH to the active submission's xlsx
+                # (global declared at top of boot())
+                new_xlsx = ROOT / active_sub["xlsx_rel"]
+                if new_xlsx.exists() and new_xlsx != XLSX_PATH:
+                    XLSX_PATH = new_xlsx
+                    load_rows()                # reload from per-submission file
+                    sync_db_from_memory()
+            print(f"[boot] submissions: {len(sub_ids)} discovered · "
+                  f"active={active_sub['name'] if active_sub else 'Main'}")
     except Exception as e:
         sys.stderr.write(f"[boot] catalog ingest failed: {e}\n")
 

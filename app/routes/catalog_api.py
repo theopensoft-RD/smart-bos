@@ -222,3 +222,62 @@ def projects_add():
 def projects_activate(project_id: int):
     catalog.set_active_project(project_id)
     return jsonify({"ok": True, "active": catalog.get_active_project()})
+
+
+# ── Submissions (v3, 2026-05-10) — multi-bidder per project ─────────
+
+@bp.route("/api/submissions")
+def submissions():
+    """List submissions for the active project (or specified ?project_id=)."""
+    proj_id = request.args.get("project_id")
+    if proj_id:
+        items = catalog.list_submissions(project_id=int(proj_id))
+    else:
+        proj = catalog.get_active_project()
+        items = catalog.list_submissions(
+            project_id=int(proj["project_id"]) if proj else None)
+    active = catalog.get_active_submission()
+    return jsonify({"ok": True, "items": items, "active": active})
+
+
+@bp.route("/api/submissions/discover", methods=["POST"])
+def submissions_discover():
+    """Re-scan output/ for new submission subdirs (idempotent)."""
+    proj = catalog.get_active_project()
+    if not proj:
+        return jsonify({"ok": False, "error": "no active project"}), 503
+    output = current_app.config["COMPLY_OUTPUT"]
+    ids = catalog.discover_submissions_in_output(
+        output, project_id=int(proj["project_id"]))
+    return jsonify({"ok": True, "count": len(ids), "ids": ids})
+
+
+@bp.route("/api/submissions/<int:submission_id>/activate", methods=["POST"])
+def submissions_activate(submission_id: int):
+    """Switch the active submission. Reloads ROWS from the new xlsx so
+    the GUI sees that submission's Col C/D values + verifications."""
+    catalog.set_active_submission(submission_id)
+    new_active = catalog.get_active_submission()
+    if not new_active:
+        return jsonify({"ok": False, "error": "submission not found"}), 404
+
+    # Swap the GUI's XLSX_PATH and reload — local import to avoid a
+    # circular dep at module load.
+    try:
+        import comply_verify_gui as gui
+        new_xlsx = current_app.config["COMPLY_ROOT"] / new_active["xlsx_rel"]
+        if new_xlsx.exists():
+            gui.XLSX_PATH = new_xlsx
+            gui.load_rows()
+            gui.sync_db_from_memory()
+            db.log_audit(action="submission_activate",
+                         target_type="submission",
+                         target_id=str(submission_id),
+                         details={"name": new_active.get("name"),
+                                  "xlsx_rel": new_active.get("xlsx_rel")},
+                         actor="user")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"reload failed: {e}",
+                        "active": new_active}), 500
+
+    return jsonify({"ok": True, "active": new_active})

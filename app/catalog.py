@@ -125,6 +125,156 @@ def get_active_project() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Submissions (v3, 2026-05-10) — multi-bidder per project
+# ---------------------------------------------------------------------------
+# A "submission" is a specific consortium's response to a project's TOR.
+# Same project, multiple submissions = multiple vendor proposals each
+# with its own xlsx + catalog bindings.
+
+def list_submissions(project_id: int | None = None) -> list[dict]:
+    sql = "SELECT * FROM submissions"
+    params: tuple = ()
+    if project_id is not None:
+        sql += " WHERE project_id = ?"
+        params = (project_id,)
+    sql += " ORDER BY name"
+    with db.conn() as c:
+        return [dict(r) for r in c.execute(sql, params)]
+
+
+def upsert_submission(*, project_id: int, name: str,
+                       output_subdir: str, xlsx_rel: str,
+                       code: str | None = None,
+                       notes: str | None = None) -> int:
+    """Insert (or update by project_id+name) and return submission_id."""
+    with db.conn() as c:
+        existing = c.execute(
+            "SELECT submission_id FROM submissions WHERE project_id=? AND name=?",
+            (project_id, name),
+        ).fetchone()
+        if existing:
+            c.execute(
+                """UPDATE submissions
+                   SET code=?, output_subdir=?, xlsx_rel=?, notes=?,
+                       updated_at=?
+                   WHERE submission_id=?""",
+                (code, output_subdir, xlsx_rel, notes, _now(),
+                 existing["submission_id"]),
+            )
+            return int(existing["submission_id"])
+        cur = c.execute(
+            """INSERT INTO submissions
+               (project_id, name, code, output_subdir, xlsx_rel, notes)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (project_id, name, code, output_subdir, xlsx_rel, notes),
+        )
+        return int(cur.lastrowid)
+
+
+def set_active_submission(submission_id: int) -> None:
+    """Mark exactly one submission active (within its project scope)."""
+    with db.conn() as c:
+        sub = c.execute(
+            "SELECT project_id FROM submissions WHERE submission_id=?",
+            (submission_id,),
+        ).fetchone()
+        if not sub:
+            return
+        c.execute("UPDATE submissions SET is_active=0 WHERE project_id=?",
+                  (sub["project_id"],))
+        c.execute(
+            "UPDATE submissions SET is_active=1, updated_at=? "
+            "WHERE submission_id=?",
+            (_now(), submission_id),
+        )
+
+
+def get_active_submission(project_id: int | None = None) -> dict | None:
+    """Return the currently active submission (within project_id, or
+    globally if not specified — falls back to the active project's)."""
+    with db.conn() as c:
+        if project_id is None:
+            proj = c.execute(
+                "SELECT project_id FROM projects WHERE is_active=1 LIMIT 1"
+            ).fetchone()
+            if not proj:
+                return None
+            project_id = int(proj["project_id"])
+        r = c.execute(
+            """SELECT s.*, p.name AS project_name, p.code AS project_code
+               FROM submissions s JOIN projects p USING(project_id)
+               WHERE s.project_id=? AND s.is_active=1 LIMIT 1""",
+            (project_id,),
+        ).fetchone()
+    return dict(r) if r else None
+
+
+def discover_submissions_in_output(output_root: Path,
+                                    project_id: int) -> list[int]:
+    """Scan ``output_root`` for first-level subdirectories that contain a
+    ``Comply spec*.xlsx`` file — register each as a submission.
+
+    Returns a list of submission_ids found/created. Idempotent.
+    """
+    output_root = Path(output_root).resolve()
+    if not output_root.exists():
+        return []
+
+    out_ids: list[int] = []
+    for sub_dir in sorted(p for p in output_root.iterdir()
+                           if p.is_dir() and not p.name.startswith((".", "_"))):
+        # Look for an xlsx in this subdir (any "Comply spec*.xlsx",
+        # excluding macOS lock/backup files)
+        candidates = sorted(
+            p for p in sub_dir.glob("Comply spec*.xlsx")
+            if not p.name.startswith("~$") and ".bak" not in p.name
+        )
+        if not candidates:
+            continue
+        xlsx_path = candidates[0]
+        rel = str(xlsx_path.relative_to(output_root.parent))   # output/<sub>/file.xlsx
+        # Auto-derive a short code: strip non-alnum, uppercase first 8 chars
+        slug = "".join(ch for ch in sub_dir.name
+                       if ch.isalnum() or ch in "_-").upper()[:12]
+        sid = upsert_submission(
+            project_id=project_id,
+            name=sub_dir.name,
+            code=slug or sub_dir.name[:8],
+            output_subdir=sub_dir.name,
+            xlsx_rel=rel,
+            notes=None,
+        )
+        out_ids.append(sid)
+    # If no submissions were found, register a "main" one pointing at the
+    # top-level xlsx (so existing single-submission projects keep working)
+    if not out_ids:
+        top = sorted(
+            p for p in output_root.glob("Comply spec*.xlsx")
+            if not p.name.startswith("~$") and ".bak" not in p.name
+        )
+        if top:
+            rel = str(top[0].relative_to(output_root.parent))
+            sid = upsert_submission(
+                project_id=project_id,
+                name="Main",
+                code="MAIN",
+                output_subdir="",
+                xlsx_rel=rel,
+                notes="Auto-created — top-level xlsx, no submission subdirs",
+            )
+            out_ids.append(sid)
+    # If nothing has been activated yet, activate the first one
+    with db.conn() as c:
+        any_active = c.execute(
+            "SELECT 1 FROM submissions WHERE project_id=? AND is_active=1 LIMIT 1",
+            (project_id,),
+        ).fetchone()
+    if not any_active and out_ids:
+        set_active_submission(out_ids[0])
+    return out_ids
+
+
+# ---------------------------------------------------------------------------
 # Catalog ingest (one-time migration: scan output/ → catalogs table)
 # ---------------------------------------------------------------------------
 
@@ -539,18 +689,32 @@ def delete_annotation(annot_id: int) -> bool:
 
 def bind_row_to_catalog(*, project_id: int, row_num: int, catalog_id: int,
                          page: int | None = None,
-                         col_d_text: str | None = None) -> None:
+                         col_d_text: str | None = None,
+                         submission_id: int | None = None) -> None:
+    """Record a row → catalog binding scoped to a specific submission.
+
+    Phase 3 (2026-05-10): adds submission_id so the same row in
+    different submissions can bind different catalogs. If submission_id
+    is None, falls back to the active submission (auto-detect).
+    """
+    if submission_id is None:
+        active = get_active_submission()
+        if active:
+            submission_id = int(active["submission_id"])
     with db.conn() as c:
         c.execute(
             """INSERT INTO row_catalog_links
-                  (project_id, row_num, catalog_id, page, col_d_text)
-               VALUES (?, ?, ?, ?, ?)
+                  (project_id, row_num, catalog_id, page, col_d_text,
+                   submission_id)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(project_id, row_num) DO UPDATE SET
                   catalog_id=excluded.catalog_id,
                   page=excluded.page,
                   col_d_text=excluded.col_d_text,
+                  submission_id=excluded.submission_id,
                   bound_at=CURRENT_TIMESTAMP""",
-            (project_id, row_num, catalog_id, page, col_d_text),
+            (project_id, row_num, catalog_id, page, col_d_text,
+             submission_id),
         )
 
 

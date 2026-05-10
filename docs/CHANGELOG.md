@@ -2051,3 +2051,177 @@ HTML hooks: d-quick-annotate, quickAnnotateRow,
 - **One bind point** (`catalog.bind_row_to_catalog`) shared by all
   three flows means the "Used by" view in catalog browser is
   always accurate — no fork between manual / auto / apply.
+
+---
+
+## Phase v3 — Multi-bidder submissions (TRIO_SR_Solution + Take_IT)
+
+User requirement: *"ระบบรองรับการ comply catalog หลายบริษัทพร้อม
+กันหรือยัง โดยแต่ละบริษัทอาจจะใช้ catalog เหมือนกันหรือต่างกันก็ได้
+อย่างใน output folder ก็จะเห็นอยู่สองชื่อก็คือ TRIO_SR_Solution
+กับ TakeIT"*
+
+The output folder structure already had this pattern but the
+schema didn't model it:
+
+```
+output/
+├── 5.1.1. ระบบควบคุม...           ← shared section folders
+├── ...
+├── TRIO_SR_Solution/
+│   ├── 5.1.1. ...                  ← TRIO's catalog variants
+│   └── Comply spec Smart Plant 1 - TRIO_SR_Solution.xlsx
+└── Take_IT/
+    ├── 5.1.1. ...                  ← Take_IT's catalog variants
+    └── Comply spec Smart Plant 1 - Take IT.xlsx
+```
+
+Each consortium has its own xlsx with its own Col C/D values.
+TRIO might pick Lenovo SR630 for row 12 while Take_IT picks Dell
+PowerEdge — same row, different bindings, different annotations.
+
+### New concept: Submission
+
+```
+companies                   ← project owner (Smart Solution)
+projects                    ← the bid (Smart Plant 1)
+submissions  (NEW)          ← per-bidder response (TRIO / Take_IT)
+   submission_id PK
+   project_id FK            ← which project this submission is for
+   name                     ← "TRIO_SR_Solution" / "Take_IT"
+   code                     ← short slug
+   output_subdir            ← "TRIO_SR_Solution" relative to output/
+   xlsx_rel                 ← path to that submission's xlsx
+   is_active                ← exactly one per project at a time
+```
+
+`row_catalog_links` gained a `submission_id` column so the same
+row in different submissions binds different catalogs. Schema
+v3 = additive (existing v1/v2 DBs auto-migrate the column at boot).
+
+### Boot auto-discovery
+
+`catalog.discover_submissions_in_output(output_root, project_id)`
+scans for first-level subdirs containing `Comply spec*.xlsx` and
+registers each as a submission. Idempotent. If no subdirs exist,
+falls back to a "Main" submission pointing at the top-level xlsx
+(so single-vendor projects still work).
+
+Boot output:
+```
+[boot] catalog library: 309 PDFs scanned (308 fast-skip-by-sha) · active project=Smart Plant 1
+[boot] submissions: 2 discovered · active=TRIO_SR_Solution
+```
+
+### Active submission xlsx swap
+
+Switching submissions changes the GUI's working file:
+
+```
+POST /api/submissions/<id>/activate
+  ↓
+catalog.set_active_submission(id)         (DB flag flip)
+  ↓
+gui.XLSX_PATH = ROOT / new_xlsx_rel       (module-level global swap)
+gui.load_rows()                            (reload from new file)
+gui.sync_db_from_memory()                  (refresh DB mirror)
+  ↓
+audit_log: "submission_activate"
+  ↓
+return {ok: true, active: {…}}
+```
+
+Frontend then refreshes `/api/index` → repopulates ROWS_BY_NUM →
+re-renders tree. Each submission's verifications/notes are pulled
+from the same `verification_status` table (not yet per-submission;
+deferred).
+
+### New API surface
+
+```
+GET  /api/submissions                    list with active marker
+POST /api/submissions/discover           re-scan output/ for new bidders
+POST /api/submissions/<id>/activate      switch + reload
+```
+
+### UI: extended Project Switcher modal
+
+The existing topbar pill (UX-1) now reads
+`{project_code} · {submission_code}`:
+```
+SP1 · TRIO         ←  active project · active submission
+```
+
+The Project Switcher modal (`▾ More → Switch project`) gains a new
+"Submissions (bidders for active project)" section listing all
+discovered submissions with one-click activation. Each entry shows:
+- Name + code
+- xlsx path (full relative path)
+- ACTIVE pill on the current one
+
+Plus a `↻ Re-scan` button to re-trigger
+`/api/submissions/discover` if user just dropped new submission
+folders into `output/`.
+
+### What's shared vs scoped
+
+| Concept | Scope | Notes |
+|---|---|---|
+| Catalog library (309 PDFs) | **Global** | Same library, both submissions can pick from it |
+| Catalog metadata (brand/model/section) | **Global** | Edit once, all submissions see the change |
+| Catalog annotations (PDF baked) | **Per-submission** | TRIO/Take_IT each have their own folder of annotated PDFs |
+| `row_catalog_links` | **Per-submission** | Same row → different catalog per bidder |
+| xlsx (Col C/D values) | **Per-submission** | Each bidder's actual proposal |
+| Verification status (verdicts) | Global (not yet scoped) | Deferred — likely OK since user proofs once per submission |
+| Learned patterns | Global | OK — patterns learn from any submission's corrections |
+| Audit log | Global | timestamps audit_log entry with `target_id=submission_id` for switches |
+
+### Verification
+
+```
+$ uv run pytest -q
+40 passed in 5.96s   (was 39, +1 for submission switching)
+
+$ uv run ruff check .
+All checks passed!
+
+Boot output:
+  [boot] submissions: 2 discovered · active=TRIO_SR_Solution
+
+Switch test:
+  XLSX_PATH: ...TRIO_SR_Solution.xlsx → ...Take IT.xlsx ✓
+  ROWS reload: 660 → 660 ✓
+  R12 Col D persists across switch ✓
+```
+
+### Workflow user can now do
+
+```
+1. Open GUI — auto-loads TRIO submission
+2. Verify some rows under TRIO
+3. Topbar pill shows "SP1 · TRIO"
+4. Click pill → Project Switcher → Submissions section
+5. Click "Take_IT" → toast "✓ Switched submission · reloading xlsx"
+6. Tree re-renders with Take_IT's Col D values
+7. Verify rows under Take_IT (separate work)
+8. Switch back any time
+```
+
+Same catalog library, different bidder bindings. Catalog browser's
+"Used by" still works — shows row links for whichever submission
+the catalog has been bound to.
+
+### Lessons
+
+- **Multi-tenancy patterns** like this need the scope key (here:
+  `submission_id`) on every binding/audit row from day one.
+  Backfilling later means joining many tables. Schema v3 added
+  exactly one column to one table — clean migration.
+- **xlsx swap at runtime** works because `XLSX_PATH` was already
+  a module-level global readable everywhere. Wrapping the switch
+  in an API endpoint that calls `load_rows()` + `sync_db_from_memory()`
+  is enough — no per-request session state.
+- **Auto-discovery beats manual registration** for tools driven
+  by filesystem layout. The user already organized
+  `output/TRIO_SR_Solution/` with the xlsx inside — the system
+  just needs to scan once at boot. Zero config.
