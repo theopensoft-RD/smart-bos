@@ -2085,6 +2085,27 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/manual")
+def manual_page():
+    """Render the user manual as a styled standalone page (TOC + search)."""
+    return render_template("manual.html")
+
+
+@app.route("/api/manual/raw")
+def api_manual_raw():
+    """Return the raw markdown of docs/MANUAL.md so the manual page can
+    render it client-side via marked.js. Falls back to a stub message if
+    the file is missing."""
+    p = ROOT / "docs" / "MANUAL.md"
+    if not p.exists():
+        return Response(
+            "# Manual not found\n\nExpected at `docs/MANUAL.md`.",
+            mimetype="text/markdown; charset=utf-8",
+        )
+    return Response(p.read_text(encoding="utf-8"),
+                    mimetype="text/markdown; charset=utf-8")
+
+
 @app.route("/api/index")
 def api_index():
     rows_payload = []

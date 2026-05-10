@@ -184,6 +184,28 @@ def test_export_preview_and_build_small(client, gui):
     assert any(it["filename"] == j["filename"] for it in items)
 
 
+def test_manual_routes_serve_content(client, gui):
+    """User manual: /manual renders the styled page; /api/manual/raw
+    returns the raw markdown body. Both must be reachable so the topbar
+    Manual link and onboarding 'Open manual' button work."""
+    # Raw markdown
+    r = client.get("/api/manual/raw")
+    assert r.status_code == 200
+    assert "markdown" in r.content_type
+    md = r.get_data(as_text=True)
+    assert len(md) > 1000
+    assert "Comply Verify Tool" in md
+    assert "Keyboard Shortcuts" in md  # appendix exists
+
+    # Rendered manual page
+    r = client.get("/manual")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    must = ["/api/manual/raw", "marked", "man-aside", "man-search"]
+    missing = [m for m in must if m not in html]
+    assert not missing, f"manual page missing: {missing}"
+
+
 def test_phase_c_catalog_editor_ui_present(client, gui):
     """Phase C: Catalog Browser detail pane includes Edit-annotations button
     + catalogEditAnnotations JS + edit-mode banner element/CSS. Verifies the

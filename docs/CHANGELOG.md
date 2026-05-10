@@ -1399,3 +1399,86 @@ re-baking PDFs). Not blocking anything user-facing today.
 - **Wrap-and-extend pattern** (`const _orig = saveEdits;
   window.saveEdits = async function() { … }`) lets us add
   catalog-aware behavior without forking the save flow.
+
+---
+
+## Phase C+ — User manual (docs/MANUAL.md + /manual page)
+
+**Trigger**: user request — *"ใช้ claude design จัดทำ manual สอนใช้
+งานระบบนี้อย่างละเอียด"*. Now that all user-facing features ship,
+they need a single source of truth that explains how to actually
+USE the thing — not just architecture docs for developers.
+
+**Built**:
+- `docs/MANUAL.md` (~34 KB Thai markdown) — comprehensive user manual
+  covering 12 chapters + 4 appendices:
+  1. ภาพรวมระบบ (overview + concepts)
+  2. เริ่มต้นใช้งาน (setup + auth + launch)
+  3. รู้จักหน้าจอ (UI walkthrough — every panel)
+  4. Workflow หลัก: User-proof loop
+  5. แก้ไข Col D (3 ways: inline, right-click, AI)
+  6. Annotation ใน catalog PDF (edit mode + tools + floating toolbar)
+  7. Catalog Library (browse / metadata / **edit annotations** / apply)
+  8. AI Assistance (Claude Code Run + auto-annotate + manual + wizard
+     + teach-back + patterns triggered)
+  9. Export PDF Package
+  10. Project & Continuity (multi-company + STATE handoff)
+  11. Versions & Audit (snapshots + audit log)
+  12. Troubleshooting (common issues + recovery)
+  + Appendix A: keyboard shortcuts (full table)
+  + Appendix B: file paths + DB schema
+  + Appendix C: glossary
+  + Appendix D: developer quick reference
+
+- `app/server/templates/manual.html` (~12 KB) — clean standalone
+  rendered viewer:
+  - **Sticky header** with project name pill + search box + "back to
+    GUI" link
+  - **Sticky aside TOC** built dynamically from h2/h3 headings
+    (3-level outline, indented)
+  - **ScrollSpy**: highlights current section in TOC as you scroll
+  - **Inline search**: type 2+ chars → debounced 200 ms →
+    highlights matches with `<mark>` + scrolls to first hit
+  - **Light/dark theme** auto-follows system preference
+  - **Mobile-responsive**: collapses to single column < 900 px
+  - **Print-friendly**: `@media print` hides header/aside, expands
+    main column
+  - Renders markdown via `marked.js` (CDN, single 30 KB script)
+
+- 2 new routes (in main module — small, no blueprint needed):
+  - `GET /manual` → renders the styled HTML viewer
+  - `GET /api/manual/raw` → returns raw markdown body (so the
+    template renders it client-side, keeping markdown as the
+    canonical source)
+
+- 3 entry points wired:
+  - **Topbar menu**: new item "📖 คู่มือการใช้งาน (Manual)" between
+    Settings and Help
+  - **Onboarding modal**: prominent banner with primary "เปิดคู่มือ"
+    button so first-time users see it immediately
+  - **Direct URL**: `/manual` opens in new tab (so docs stay open
+    while user works)
+
+**Why a separate viewer instead of an in-GUI modal**:
+- Manual is **long** (34 KB, ~12 sections). A modal would feel
+  cramped and lose context when user closes it.
+- Opening in a new tab lets the user keep the GUI open in one window
+  and the manual in another — common pattern for documentation.
+- The standalone page is also share-able and printable.
+
+**Verification**:
+- 12/12 smoke tests pass (was 11; +1 for `test_manual_routes_serve_content`)
+- `ruff check`: All checks passed
+- Manual page tested at `/manual` — TOC builds, ScrollSpy works,
+  search highlights, theme follows system
+
+**Lessons**:
+- **Markdown stays canonical**: rendering via marked.js client-side
+  means the source is plain `.md` (editable in any editor, version-
+  controllable, portable). No build step.
+- **Sticky TOC + ScrollSpy** is the right UX for a long manual —
+  user always knows where they are without scrolling away from
+  content.
+- **Onboarding integration** is critical: users won't read the
+  manual if they don't know it exists. The first-time modal now
+  has a prominent "เปิดคู่มือ" CTA.

@@ -3543,6 +3543,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
           <button onclick="closeTopbarMenu();showVersions()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Project versions</span></button>
           <div class="menu-sep"></div>
           <button onclick="closeTopbarMenu();showSettings()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
+          <button onclick="closeTopbarMenu();window.open('/manual','_blank')" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>📖 คู่มือการใช้งาน (Manual)</span></button>
           <button onclick="closeTopbarMenu();showOnboarding(true)" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-help"/></svg><span>Help &amp; shortcuts</span></button>
         </div>
       </div>
@@ -4062,6 +4063,14 @@ body[data-embedded="1"] .kbd-help { display: none; }
       <li><span class="kbd">⌘S</span><span>save edits</span></li>
     </ul>
     <p style="font-size:var(--t-sm);color:var(--c-text-soft)">คลิก Col D เพื่อ Re-annotate / Auto-annotate / Edit. กด Settings ด้านขวาบนเพื่อปรับ theme + language</p>
+    <div style="background:var(--c-primary-soft);border:1px solid var(--c-primary);border-radius:var(--r-md);padding:var(--s-3) var(--s-4);margin:var(--s-3) 0;display:flex;gap:var(--s-3);align-items:center">
+      <svg class="ico" aria-hidden="true" style="flex-shrink:0"><use href="#i-book"/></svg>
+      <div style="flex:1">
+        <strong>📖 มีคู่มือฉบับเต็มแล้ว!</strong>
+        <span style="display:block;font-size:var(--t-sm);color:var(--c-text-soft)">เรียนรู้ทุก feature — workflow, catalog editor, AI, export, troubleshooting</span>
+      </div>
+      <button class="btn btn-primary" onclick="window.open('/manual','_blank')" style="flex-shrink:0">เปิดคู่มือ</button>
+    </div>
     <div class="onboard-actions">
       <button class="btn" onclick="closeOnboarding()">Skip</button>
       <button class="btn btn-primary" onclick="closeOnboarding();dontShowOnboardingAgain()">Got it</button>
