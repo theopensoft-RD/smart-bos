@@ -35,11 +35,10 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
 
 from . import database as db
-
 
 # ---------------------------------------------------------------------------
 # LLM provider hook (pluggable, off by default)

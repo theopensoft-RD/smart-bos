@@ -4,6 +4,7 @@ Clone PoE L2 Switch reference PDF to 5 sister sections + update xlsx.
 """
 import os
 import shutil
+
 import fitz
 import openpyxl
 

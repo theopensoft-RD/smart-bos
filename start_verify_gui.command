@@ -19,43 +19,38 @@ cat <<'BANNER'
 
 BANNER
 
-# 1. ensure Python 3.10+ (claude-agent-sdk needs 3.10; we prefer 3.11)
-PY=""
-for cand in python3.13 python3.12 python3.11 python3.10 python3; do
-  if command -v "$cand" >/dev/null 2>&1; then
-    ver=$("$cand" -c "import sys; print(sys.version_info[:2] >= (3,10))" 2>/dev/null)
-    if [ "$ver" = "True" ]; then
-      PY=$(command -v "$cand")
-      break
-    fi
+# 1. ensure uv (https://docs.astral.sh/uv/) — fast Python package manager
+#    + auto-manages Python 3.10+ for us via `uv python install`
+if ! command -v uv >/dev/null 2>&1; then
+  echo "ℹ uv (Python package manager) ยังไม่ถูกติดตั้ง"
+  if command -v brew >/dev/null 2>&1; then
+    echo "   ติดตั้งผ่าน Homebrew: brew install uv"
+    brew install uv || {
+      echo "❌ brew install uv ล้มเหลว"
+      read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
+      exit 1
+    }
+  else
+    echo "   ติดตั้งผ่าน: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    curl -LsSf https://astral.sh/uv/install.sh | sh || {
+      echo "❌ ติดตั้ง uv ล้มเหลว"
+      read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
+      exit 1
+    }
+    export PATH="$HOME/.local/bin:$PATH"
   fi
-done
-if [ -z "$PY" ]; then
-  echo "❌ ไม่พบ Python 3.10+ — Phase 1 (Claude Code as core) ต้องใช้ 3.10 ขึ้นไป"
-  echo "   ติดตั้งผ่าน: brew install python@3.11"
+fi
+
+# 2. let uv resolve/install dependencies from pyproject.toml. First run
+#    creates .venv with Python 3.11 + all deps. Subsequent runs are ~0.1s.
+echo "⚙  uv sync (รวดเร็ว — ใช้ pyproject.toml + lockfile)…"
+if ! uv sync --quiet 2>&1; then
+  echo "❌ uv sync ล้มเหลว"
   read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
   exit 1
 fi
+PY=".venv/bin/python"
 echo "▶  ใช้ $PY ($($PY --version))"
-
-# 2. ensure dependencies (install on first run)
-need_install=()
-$PY -c "import flask" 2>/dev/null || need_install+=("flask")
-$PY -c "import openpyxl" 2>/dev/null || need_install+=("openpyxl")
-$PY -c "import fitz" 2>/dev/null || need_install+=("pymupdf")
-$PY -c "import PIL" 2>/dev/null || need_install+=("pillow")
-$PY -c "import claude_agent_sdk" 2>/dev/null || need_install+=("claude-agent-sdk")
-
-if [ ${#need_install[@]} -gt 0 ]; then
-  echo "⚙  ติดตั้ง dependency ครั้งแรก: ${need_install[*]}"
-  $PY -m pip install --user --quiet "${need_install[@]}" || {
-    echo "❌ ติดตั้ง dependency ไม่สำเร็จ"
-    read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
-    exit 1
-  }
-  echo "✓ ติดตั้งเรียบร้อย"
-  echo
-fi
 
 # 2b. ensure Claude Code CLI (npm package). Optional — only needed if
 # user wants Claude Max OAuth path. Skip silently if npm not present.

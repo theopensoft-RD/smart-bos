@@ -1,0 +1,91 @@
+[project]
+name = "smart-bos-comply"
+version = "0.1.0"
+description = "Comply Verify Tool — HITL GUI for verifying AI-generated annotations on Comply spec"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "flask>=3.0",
+    "openpyxl>=3.1",
+    "pymupdf>=1.24",
+    "pillow>=10.0",
+    # Phase 1: Claude Code (Agent SDK) provider
+    "claude-agent-sdk>=0.1.80",
+    # Legacy API-direct fallback
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "pyright>=1.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "_versions",
+    "_db",
+    "output",
+    "TOR",
+    "BOQ",
+]
+
+[tool.ruff.lint]
+# Conservative defaults for an existing 14k-LOC codebase.
+# E,W = pycodestyle; F = pyflakes; B = bugbear; I = isort; UP = pyupgrade
+select = ["E", "W", "F", "B", "I", "UP"]
+ignore = [
+    "E501",  # line too long (we have many template HTML/CSS strings)
+    "E402",  # module-level import not at top of file (we have boot-time bridges)
+    "E701",  # multiple statements on one line (codebase uses guard-and-return pattern)
+    "E702",  # multiple statements on one line (semicolons in single-line guards)
+    "B008",  # function call in argument defaults (Flask uses this pattern)
+    "F401",  # unused imports — let pyright handle this
+    "F841",  # unused local variable — common during PyMuPDF dance
+    "UP007", # X | Y for Optional — we still support 3.10 syntax variant
+]
+
+[tool.ruff.lint.per-file-ignores]
+"comply_verify_gui.py" = [
+    "E741",  # ambiguous variable names (template uses 'l', 'O' etc.)
+    "B007",  # unused loop control variable
+]
+"tests/*" = [
+    "F811",  # fixture redefinition is normal in pytest
+]
+
+[tool.pyright]
+# Pyright is set to advisory ("off") mode for now. The 14k-LOC monolith
+# wasn't authored with strict typing in mind; gradually annotate new
+# files instead of fixing 100+ historical errors.
+include = ["app", "scripts", "tests"]
+exclude = [
+    "**/__pycache__",
+    "_versions",
+    "_db",
+    "output",
+    "TOR",
+    "BOQ",
+]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "off"
+pythonVersion = "3.10"
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+reportPrivateImportUsage = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short -p no:cacheprovider"
+filterwarnings = [
+    "ignore::DeprecationWarning:flask.*",
+    "ignore::DeprecationWarning:openpyxl.*",
+]

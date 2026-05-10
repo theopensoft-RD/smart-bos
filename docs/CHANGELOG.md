@@ -781,3 +781,99 @@ operates at a higher level than raw filesystem (`get_row(N)`,
 
 **Phase 3 (deferred)**: deeper HITL — "Pin this correction as a
 rule", "Always skip rows like this", per-row conversation logs.
+
+---
+
+## Tier 1 — Tech-stack hygiene (repo move + uv + lint + tests)
+
+After Phase 1 the day-to-day pain wasn't bugs, it was friction:
+Google Drive's iCloud-sync broke `.git/`, pip was slow, no smoke
+suite to catch regressions. This pass kills all of those.
+
+### 1.1 Repo moved to local SSD
+
+```
+Before: ~/Library/CloudStorage/GoogleDrive-…/comply-module/
+              code + .git + output + _versions all in iCloud-sync
+
+After:  ~/Code/smart-bos/
+        ├── code + .git           ← real local files (fast)
+        ├── _db/                  ← real local (per-machine state)
+        └── output → /GDrive/…/comply-module/output      ← symlink
+            _versions → …                                 ← symlink
+            BOQ → …                                       ← symlink
+            TOR → …                                       ← symlink
+```
+
+Why: every `git status` / `version.py snap` / `git push` previously
+risked iCloud "online-only" timeouts; we already had a `/tmp clone`
+workaround that was annoying. Now `.git/` is genuinely local;
+project data still lives in GDrive (shared with team) via symlinks.
+
+A marker `_README_CODE_MOVED.md` was left in GDrive's old
+`comply-module/` so anyone opening it sees where the code went.
+
+### 1.2 uv replaces pip
+
+`pyproject.toml` now declares deps. `uv sync` creates a `.venv`
+with Python 3.10+ (uv auto-installs Python if missing) and resolves
+all deps. `uv.lock` is committed for reproducible builds.
+
+| Operation | Before (pip --user) | After (uv sync) |
+|---|---|---|
+| First install | ~30 s | ~75 s (incl. Python install) |
+| Subsequent runs | ~5 s (re-checks) | **~0.09 s** |
+
+The launcher (`start_verify_gui.command`) now uses `.venv/bin/python`
+exclusively; if `uv` isn't installed it `brew install`s it (or
+falls back to the official curl install).
+
+### 1.3 ruff + pyright wired in
+
+- **ruff**: `extend-select = E,W,F,B,I,UP`. Auto-fixed 40 stylistic
+  issues on first run; 75 more were the codebase's intentional
+  one-line guards (`E701/E702`) — ignored in pyproject.toml.
+  **Final: All checks passed!**
+- **pyright**: `typeCheckingMode = "off"` for now (the 14 K-LOC
+  monolith wasn't authored with strict typing in mind). New modules
+  in `app/` will be annotated as they're added; eventually flip to
+  `basic` and gradually retrofit. For Phase 1's
+  `claude_code_provider.py` the imports already resolve cleanly.
+
+### 1.4 Smoke test suite (pytest)
+
+`tests/test_smoke.py` — 5 fast read-only checks that catch the most
+common regressions:
+
+1. `test_boot_registers_all_critical_routes` — every route the
+   frontend hits must be registered (also asserts /api/claude/stream
+   from Phase 1)
+2. `test_index_returns_rows_and_sections` — schema contract on
+   /api/index (rows list, sections list, tree dict)
+3. `test_pdf_render_view_equals_edit_byte_exact` — Phase 17
+   invariant (edit-mode bytes == view-mode bytes)
+4. `test_col_d_suggest_returns_ranked_candidates` — Phase B3 endpoint
+5. `test_claude_stream_endpoint_responds_or_503` — Phase 1 SSE never
+   500s, returns 200 stream OR 503 with hint
+
+```
+$ uv run pytest -q
+.....                                                        [100%]
+5 passed in 1.25s
+```
+
+Boot-once / session-scoped fixture means subsequent tests are ~50 ms
+each. Total < 2 sec.
+
+### Lessons captured
+
+- **"iCloud-sync + .git/ = fragility"** — even tiny `git status`
+  can timeout when on-demand fetch kicks in. Lesson: never put `.git/`
+  in cloud-sync folders. Symlinks for shared data are fine.
+- **uv is genuinely 50× faster** than pip for re-resolution. Worth
+  the install just for the speed.
+- **Ruff > flake8 + black + isort** as a single tool. The ignore-list
+  is the only real config needed for an existing codebase.
+- **5 smoke tests beat 0 smoke tests** by infinity. Don't gold-plate
+  — boot + 4 critical contracts already prevent regressions in
+  Phase 17, Phase B3, Phase 1, etc.

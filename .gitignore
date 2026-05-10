@@ -1,4 +1,3 @@
-
 # Secrets — NEVER commit
 .env
 .env.local
@@ -7,3 +6,36 @@ secrets.json
 
 # Claude Code local settings (per-machine; keep launch.json shared)
 **/.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# uv.lock IS committed (reproducible builds) — do NOT ignore
+
+# Local-only state (every machine has its own copy)
+_db/
+.cache/
+
+# Project data dirs are SYMLINKED to GDrive on dev machines.
+# Don't commit the symlinks themselves; the canonical data lives in GDrive
+# and is shared with the team via the GDrive folder.
+output
+_versions
+TOR
+BOQ
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Build artifacts (reserved)
+dist/
+build/
+*.egg-info/

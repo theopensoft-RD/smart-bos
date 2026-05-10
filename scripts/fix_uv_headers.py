@@ -11,7 +11,8 @@ RUN (ครั้งแรกจะ install pymupdf อัตโนมัติ)
     python3 fix_uv_headers.py
 """
 
-import os, sys
+import os
+import sys
 
 try:
     import fitz
@@ -125,7 +126,7 @@ def add_header_stamp(page: fitz.Page, text: str):
         # ถ้ายังไม่พอ ใช้ขนาดเล็กสุดโดยไม่ตรวจ
         page.insert_textbox(rect, text, fontsize=13, fontname=FONT,
                             color=RED, align=fitz.TEXT_ALIGN_CENTER)
-        print(f"    font 13pt (fallback)")
+        print("    font 13pt (fallback)")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -147,7 +148,7 @@ for header_text, path in FILES:
 
     doc.save(path, garbage=4, deflate=True, incremental=False)
     doc.close()
-    print(f"  Saved ✓")
+    print("  Saved ✓")
 
 print(f"\n{'='*60}")
 print("Done.")

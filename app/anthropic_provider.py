@@ -46,7 +46,6 @@ except ImportError:
 from . import database as db
 from . import learning
 
-
 # ---------------------------------------------------------------------------
 # Pricing — Anthropic public list rates (USD per million tokens), as of
 # 2025-Q4. Used for budget enforcement only — billing is whatever the
@@ -382,7 +381,7 @@ class AnthropicProvider:
 
         # Build the user message — compact, structured
         msg_parts: list[str] = []
-        msg_parts.append(f"# Row to analyze\n")
+        msg_parts.append("# Row to analyze\n")
         msg_parts.append(f"- row: R{row_context.get('row', '?')}")
         msg_parts.append(f"- section: {row_context.get('section', '?')}")
         msg_parts.append(f"- role: {row_context.get('role', 'unknown')}")

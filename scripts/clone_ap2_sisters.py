@@ -5,9 +5,10 @@ and update xlsx for all 4 sister rows.
 """
 
 import os
+import shutil
+
 import fitz
 import openpyxl
-import shutil
 
 fitz.TOOLS.mupdf_display_errors(False)
 
@@ -150,7 +151,7 @@ def update_xlsx():
 
         # Col D values for each row (parent + 8 ข้อย่อย)
         col_d_values = [
-            f"ยี่ห้อ TP-Link รุ่น EAP660 HD",                                        # parent
+            "ยี่ห้อ TP-Link รุ่น EAP660 HD",                                        # parent
             f"เทียบเท่าข้อกำหนด เอกสาร {cat} หน้า 9 ข้อ {section} ข้อย่อย 1.",  # ข้อย่อย 1
             f"เทียบเท่าข้อกำหนด เอกสาร {cat} หน้า 9 ข้อ {section} ข้อย่อย 2.",  # ข้อย่อย 2
             f"เทียบเท่าข้อกำหนด เอกสาร {cat} หน้า 9 ข้อ {section} ข้อย่อย 3.",  # ข้อย่อย 3

@@ -48,10 +48,8 @@ except ImportError:
     sys.stderr.write("Pillow is required. Install: pip3 install --user pillow\n")
     sys.exit(1)
 
+from app import core, learning
 from app import database as db
-from app import learning
-from app import core
-
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "output"
@@ -1860,7 +1858,7 @@ def apply_pdf_edits(pdf_path: Path, edits: list[dict]) -> dict:
 
     # Cache page objects so the annots returned by load_annot stay bound
     # (PyMuPDF detaches Annot objects when their page goes out of scope).
-    _pages: dict[int, "fitz.Page"] = {}
+    _pages: dict[int, fitz.Page] = {}
 
     def _get_page(pno: int):
         if pno not in _pages:
@@ -13902,7 +13900,7 @@ def boot() -> None:
     load_rows()
     print(f"[boot] {len(ROWS)} rows")
     collect_extra_refs()
-    print(f"[boot] indexing TOR sections + page text…")
+    print("[boot] indexing TOR sections + page text…")
     build_tor_section_index()
     index_tor_text()
     ch5 = sum(1 for s in TOR_SECTION_INDEX if s.startswith("5"))
@@ -13930,9 +13928,9 @@ def boot() -> None:
                       f"auth={bs.get('auth_mode')} (Max = unlimited)")
             else:
                 if not cp.SDK_AVAILABLE:
-                    print(f"[boot] Claude Code provider OFF (claude-agent-sdk not installed)")
+                    print("[boot] Claude Code provider OFF (claude-agent-sdk not installed)")
                 else:
-                    print(f"[boot] Claude Code provider OFF (set COMPLY_LLM=claude_code to enable)")
+                    print("[boot] Claude Code provider OFF (set COMPLY_LLM=claude_code to enable)")
         except Exception as e:
             sys.stderr.write(f"[boot] Claude Code install failed: {e}\n")
     elif _llm_mode == "anthropic":
@@ -13945,7 +13943,7 @@ def boot() -> None:
                       f"budget=${bs.get('budget_usd_per_day'):.2f}/day "
                       f"spent_today=${bs.get('spent_today_usd', 0):.2f}")
             else:
-                print(f"[boot] Anthropic API provider OFF (set ANTHROPIC_API_KEY to enable)")
+                print("[boot] Anthropic API provider OFF (set ANTHROPIC_API_KEY to enable)")
         except Exception as e:
             sys.stderr.write(f"[boot] Anthropic install failed: {e}\n")
 
@@ -13959,7 +13957,7 @@ def boot() -> None:
         state = sync.get("status") or "?"
         print(f"[boot] version sync: state={state}, latest={latest_id}, action={action}")
         if state in ("working_behind", "divergent", "incomplete_local"):
-            print(f"[boot] ⚠ working dir differs from latest snapshot — review in 📚 Versions")
+            print("[boot] ⚠ working dir differs from latest snapshot — review in 📚 Versions")
 
 
 def main() -> None:
@@ -13967,7 +13965,7 @@ def main() -> None:
     host = "127.0.0.1"
     port = 5173
     url = f"http://{host}:{port}"
-    print(f"\n  ✦ Comply Verify GUI ✦")
+    print("\n  ✦ Comply Verify GUI ✦")
     print(f"  → open {url} in browser\n")
 
     def _open():

@@ -22,7 +22,13 @@ Examples:
     python3 scripts/version.py diff 2026-05-09_1130 2026-05-09_1200
     python3 scripts/version.py restore 2026-05-09_1130
 """
-import argparse, hashlib, json, os, shutil, sys, tarfile
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tarfile
 from datetime import datetime
 from pathlib import Path
 
@@ -88,7 +94,7 @@ def cmd_snap(args, full: bool = False):
         # tar.gz the entire output/ folder (excluding _archive, etc.)
         out_src = ROOT / "output"
         tar_path = snap_dir / "output.tar.gz"
-        print(f"  • compressing output/ → output.tar.gz...")
+        print("  • compressing output/ → output.tar.gz...")
 
         def filter_(tarinfo):
             for ex in EXCLUDE_FROM_FULL:
@@ -173,7 +179,7 @@ def cmd_show(args):
     print(f"Timestamp: {m['timestamp']}")
     print(f"Tag:       {m.get('tag','(none)')}")
     print(f"Kind:      {m.get('kind','?')}")
-    print(f"\nTracked files in snapshot:")
+    print("\nTracked files in snapshot:")
     for path, info in m["files"].items():
         print(f"  {path:<55} {info['size']:>10,} bytes  sha:{info['sha256'][:12]}")
     print(f"\noutput/ tree at snapshot time: {len(m.get('output_tree', []))} files")
@@ -187,7 +193,7 @@ def cmd_diff(args):
     m1 = json.loads((s1 / "manifest.json").read_text(encoding="utf-8"))
     m2 = json.loads((s2 / "manifest.json").read_text(encoding="utf-8"))
 
-    print(f"\n=== Tracked files ===")
+    print("\n=== Tracked files ===")
     f1 = m1.get("files", {})
     f2 = m2.get("files", {})
     all_keys = set(f1.keys()) | set(f2.keys())
@@ -202,7 +208,7 @@ def cmd_diff(args):
         else:
             print(f"  = {k} (unchanged)")
 
-    print(f"\n=== output/ tree diff ===")
+    print("\n=== output/ tree diff ===")
     t1 = {x["path"]: x for x in m1.get("output_tree", [])}
     t2 = {x["path"]: x for x in m2.get("output_tree", [])}
     added = [k for k in t2 if k not in t1]
@@ -225,7 +231,7 @@ def cmd_restore(args, full: bool = False):
     m = json.loads((snap / "manifest.json").read_text(encoding="utf-8"))
     print(f"Restoring snapshot: {m['id']}  tag={m.get('tag','')!r}")
     if not args.yes:
-        ans = input(f"This will OVERWRITE current files. Continue? [y/N] ").strip().lower()
+        ans = input("This will OVERWRITE current files. Continue? [y/N] ").strip().lower()
         if ans != "y":
             print("Aborted.")
             return
@@ -248,11 +254,11 @@ def cmd_restore(args, full: bool = False):
         if not tar_path.exists():
             print("  ⚠ This is a quick snapshot — no output.tar.gz to restore. Use --quick or take a full snapshot.")
             return
-        print(f"  • extracting output.tar.gz → output/ (overwrites)...")
+        print("  • extracting output.tar.gz → output/ (overwrites)...")
         # Extract with safe path filter
         with tarfile.open(tar_path, "r:gz") as tar:
             tar.extractall(ROOT)
-        print(f"  ✓ restored output/ from tarball")
+        print("  ✓ restored output/ from tarball")
 
 
 def cmd_prune(args):
@@ -266,7 +272,7 @@ def cmd_prune(args):
     for s in to_remove:
         print(f"  - {s.name}")
     if not args.yes:
-        ans = input(f"Continue? [y/N] ").strip().lower()
+        ans = input("Continue? [y/N] ").strip().lower()
         if ans != "y":
             print("Aborted.")
             return
@@ -292,7 +298,7 @@ def cmd_auto_snap(args):
     if last_sha == cur_sha:
         print(f"xlsx unchanged since last snapshot ({last.name}). Skipping.")
         return
-    print(f"xlsx changed — taking auto snapshot")
+    print("xlsx changed — taking auto snapshot")
     cmd_snap(argparse.Namespace(tag="auto"))
 
 

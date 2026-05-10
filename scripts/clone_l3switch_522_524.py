@@ -4,6 +4,7 @@
 import os
 import sys
 import tempfile
+
 import fitz  # PyMuPDF
 import openpyxl
 
@@ -98,7 +99,7 @@ def collect_annotations(ref_path):
     """Collect all annotations from reference PDF, organized by page index."""
     doc = fitz.open(ref_path)
     pages_annots = []
-    for pi, page in enumerate(doc):
+    for _pi, page in enumerate(doc):
         page_data = []
         for a in page.annots():
             atype = a.type[0]
@@ -272,7 +273,7 @@ def main():
         print(f"  Created: {os.path.basename(out_path)}")
         files_created += 1
 
-    print(f"\nUpdating xlsx...")
+    print("\nUpdating xlsx...")
     total_rows = update_xlsx(XLSX_PATH)
     print(f"  Updated {total_rows} rows across 4 sections")
 

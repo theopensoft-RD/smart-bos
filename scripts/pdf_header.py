@@ -155,7 +155,7 @@ def process_file(path: str, args) -> bool:
     if out_path != path:
         print(f"    → {os.path.basename(out_path)}")
     else:
-        print(f"    → overwritten")
+        print("    → overwritten")
 
     return True
 

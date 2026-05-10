@@ -48,22 +48,23 @@ import json
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 try:
     from claude_agent_sdk import (
-        query,
-        ClaudeAgentOptions,
         AssistantMessage,
+        ClaudeAgentOptions,
         ResultMessage,
         TextBlock,
         ThinkingBlock,
-        ToolUseBlock,
         ToolResultBlock,
+        ToolUseBlock,
         UserMessage,
         create_sdk_mcp_server,
+        query,
         tool,
     )
     SDK_AVAILABLE = True
@@ -73,7 +74,6 @@ except ImportError as e:
 
 from . import database as db
 from . import learning
-
 
 # ---------------------------------------------------------------------------
 # MCP custom tools — what Claude calls to produce structured output.
@@ -367,7 +367,7 @@ class ClaudeCodeProvider:
         )
         return "\n".join(msg_parts)
 
-    def _build_options(self) -> "ClaudeAgentOptions":
+    def _build_options(self) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
             system_prompt=self._system_prompt(),
             mcp_servers={"comply": self._mcp},
