@@ -1673,6 +1673,35 @@ select { cursor: pointer; }
 .col-d-menu button.primary:hover { background: var(--c-success-soft); }
 .col-d-menu .sep { height: 1px; background: var(--c-divider); margin: var(--s-2) 0; }
 
+/* ── Phase C: Catalog edit-mode banner (top of viewport) ────────── */
+.catalog-edit-banner {
+  position: fixed;
+  top: calc(var(--safe-top, 0px) + 4px);
+  left: 50%;
+  transform: translateX(-50%) translateY(-200%);
+  z-index: 200;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: var(--c-warn-soft);
+  color: var(--c-warn-text);
+  border: 1px solid var(--c-warn);
+  border-radius: 999px;
+  font-size: var(--t-sm);
+  box-shadow: var(--e-2);
+  transition: transform 200ms var(--ease-out);
+  max-width: calc(100vw - 40px);
+}
+.catalog-edit-banner.show { transform: translateX(-50%) translateY(0); }
+.catalog-edit-banner .ceb-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.catalog-edit-banner .ceb-hint { color: var(--c-text-soft); margin-left: 6px; font-style: italic; }
+.catalog-edit-banner .ceb-icon { display: inline-flex; }
+.catalog-edit-banner .ceb-close {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--c-warn-text); padding: 2px 6px; font-size: 14px;
+  border-radius: var(--r-sm);
+}
+.catalog-edit-banner .ceb-close:hover { background: rgba(0,0,0,0.06); }
+
 /* ── Phase 2: Catalog browser ────────────────────────────────────── */
 #catalog-list .cat-item {
   padding: 8px 10px;
@@ -7525,8 +7554,9 @@ function catalogRenderDetail(c, links) {
 
     <div class="detail-actions">
       <button class="primary" onclick="catalogSaveMeta(${c.catalog_id})">${ico('save', 13)}<span>Save metadata</span></button>
-      ${SELECTED_ROW ? `<button class="success" onclick="catalogApplyToRow(${c.catalog_id})">${ico('check', 13)}<span>Apply to R${SELECTED_ROW}</span></button>` : `<button disabled title="select a row first">${ico('check', 13)}<span>Apply to row…</span></button>`}
-      <button onclick="catalogOpenPdf('${escapeHtml(c.pdf_rel || '')}')">${ico('eye', 13)}<span>Open PDF</span></button>
+      <button class="success" onclick="catalogEditAnnotations(${c.catalog_id}, '${escapeHtml(c.pdf_rel || '')}')" title="โหลด catalog เข้า PDF viewer + เข้า edit mode (annotations เซฟลง PDF เลย)">${ico('pencil', 13)}<span>Edit annotations</span></button>
+      ${SELECTED_ROW ? `<button onclick="catalogApplyToRow(${c.catalog_id})">${ico('check', 13)}<span>Apply to R${SELECTED_ROW}</span></button>` : `<button disabled title="select a row first">${ico('check', 13)}<span>Apply to row…</span></button>`}
+      <button onclick="catalogOpenPdf('${escapeHtml(c.pdf_rel || '')}')">${ico('eye', 13)}<span>Open PDF (raw)</span></button>
     </div>
 
     <div class="detail-section">
@@ -7612,6 +7642,105 @@ function catalogOpenPdf(pdf_rel) {
   // Open the PDF in a new tab (uses existing /api/raw_pdf)
   if (!pdf_rel) return;
   window.open(`/api/raw_pdf?rel=${encodeURIComponent(pdf_rel)}`, '_blank');
+}
+
+// ── Phase C: Catalog annotation editor ──────────────────────────
+// Loads the catalog PDF into the existing PDF pane + enters edit
+// mode so the user can use ALL existing tools (drawRect / addText /
+// floating toolbar / undo/redo / save) on the catalog itself. Saves
+// bake into the PDF file via /api/pdf_save (same as project rows).
+async function catalogEditAnnotations(catalog_id, pdf_rel) {
+  if (!pdf_rel) {
+    toast('No PDF', 'catalog has no pdf_rel', 'warn', 2500);
+    return;
+  }
+  // Remember which catalog we're editing so save can update DB stats
+  _CATALOG_EDIT_CONTEXT = {catalog_id, pdf_rel};
+
+  closeCatalogBrowser();
+
+  // Make sure PDF pane is visible (mobile may have it hidden behind tabs)
+  if (typeof setMobileTab === 'function') {
+    try { setMobileTab('pdf'); } catch (e) {}
+  }
+
+  // Disable the row-based highlight while we're in catalog mode —
+  // catalog editor isn't bound to a row.
+  if (typeof clearRowSelection === 'function') {
+    try { clearRowSelection(); } catch (e) {}
+  }
+
+  // Load the catalog PDF + jump to page 1
+  await loadPdf(pdf_rel, 1, null);
+
+  // Enter edit mode if not already
+  if (!EDIT_MODE && typeof toggleEditMode === 'function') {
+    toggleEditMode();
+  }
+
+  // Show a discreet banner so user knows they're editing a catalog
+  // (not a project row) — affects what "Save" means
+  _catalogShowEditBanner(catalog_id, pdf_rel);
+
+  toast('Catalog edit mode',
+        `Editing ${pdf_rel.split('/').pop()} — annotations save into the PDF file.`,
+        'info', 5000);
+}
+
+// Banner that sits above the PDF pane while catalog edit is active
+let _CATALOG_EDIT_CONTEXT = null;
+function _catalogShowEditBanner(catalog_id, pdf_rel) {
+  let bar = document.getElementById('catalog-edit-banner');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'catalog-edit-banner';
+    bar.className = 'catalog-edit-banner';
+    document.body.appendChild(bar);
+  }
+  const filename = (pdf_rel || '').split('/').pop();
+  bar.innerHTML = `
+    <span class="ceb-icon">${ico('pencil', 14)}</span>
+    <span class="ceb-text">
+      <strong>Catalog edit mode</strong>
+      · ${escapeHtml(filename)}
+      <span class="ceb-hint">— annotations save into the PDF file</span>
+    </span>
+    <button class="ceb-close" onclick="catalogExitEditMode()" title="Exit catalog edit mode">✕</button>
+  `;
+  bar.classList.add('show');
+}
+function catalogExitEditMode() {
+  _CATALOG_EDIT_CONTEXT = null;
+  const bar = document.getElementById('catalog-edit-banner');
+  if (bar) bar.classList.remove('show');
+  if (EDIT_MODE && typeof toggleEditMode === 'function') {
+    // Will prompt to save if dirty
+    toggleEditMode();
+  }
+}
+
+// Hook into existing saveEdits — after the PDF save succeeds while
+// in catalog-edit mode, also bump the catalog's updated_at so the
+// browser shows the freshness. (Heavier integration with
+// catalog_annotations table = future work.)
+if (typeof saveEdits === 'function') {
+  const _origSaveEdits_for_catalog = saveEdits;
+  window.saveEdits = async function() {
+    const ctx = _CATALOG_EDIT_CONTEXT;
+    await _origSaveEdits_for_catalog.apply(this, arguments);
+    if (ctx) {
+      try {
+        // Bump catalog updated_at via PATCH (no actual field change)
+        await fetch(`/api/catalogs/${ctx.catalog_id}`, {
+          method: 'PATCH', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({}),  // empty patch — just touches updated_at
+        });
+      } catch (e) { /* silent */ }
+      toast('✓ Catalog saved',
+            `${(ctx.pdf_rel || '').split('/').pop()} — change reflects in next export`,
+            'learn', 3500);
+    }
+  };
 }
 // ── Continuity STATE banner + modal ──────────────────────────────
 let _CONTINUITY = null;

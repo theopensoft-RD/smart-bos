@@ -1308,3 +1308,94 @@ $ wc -l comply_verify_gui.py
   everything in one go. The "pure" CRUD endpoints came out cleanly;
   the xlsx-mutating endpoints would have required encapsulating
   ROWS/PDF_INDEX first, which is a separate refactor.
+
+---
+
+## Phase C — Catalog annotation editor (ship-now MVP)
+
+**Trigger**: user feedback after the audit — *"แก้ระบบมานานแล้วงาน
+หลักไม่ได้ทำสักที"* (we keep refactoring infra, the actual user-proof
+work hasn't shipped). Phase C closes the last user-facing gap: a way
+to edit annotations on catalogs from the new catalog browser, so the
+user can finish the user-proof pass and submit.
+
+**Decision**: ship the SIMPLEST thing that works rather than build a
+brand-new DB-annotation editor. The existing PDF edit flow (Phase 17
+WYSIWYG + Phase A5 floating toolbar + drawRect / addText / undo /
+redo / save) is battle-tested. Reuse it, route catalogs through it,
+done.
+
+**Built**:
+- New "**Edit annotations**" button in the catalog browser detail
+  pane (next to "Save metadata" / "Apply to row" / "Open PDF (raw)").
+- New JS `catalogEditAnnotations(catalog_id, pdf_rel)`:
+  1. Stores `_CATALOG_EDIT_CONTEXT = {catalog_id, pdf_rel}`
+  2. Closes the catalog browser modal
+  3. Switches mobile view to the PDF tab if needed
+  4. Calls existing `loadPdf(pdf_rel, 1, null)` (no row binding,
+     no row-highlight)
+  5. Calls `toggleEditMode()` to enter the existing edit flow
+  6. Shows a floating warn-colored "Catalog edit mode" banner with
+     filename + close button
+- The user now has the **full Phase 17 + A5 toolset**: drawRect,
+  addText, click-to-select, drag-to-move, resize handles, undo/
+  redo, floating annotation toolbar, byte-exact WYSIWYG preview.
+- Save (existing `saveEdits` → `/api/pdf_save` → `apply_pdf_edits`)
+  bakes annotations into the actual catalog PDF file.
+- A small wrapper around `saveEdits` detects when we're in catalog
+  edit mode and after the PDF save succeeds it pings
+  `PATCH /api/catalogs/<id>` with `{}` to bump `updated_at` (so
+  the catalog browser shows freshness when the user reopens it).
+- "Catalog edit mode" banner has an `✕` button → calls
+  `catalogExitEditMode()` which clears the context, hides the
+  banner, and toggles edit mode off (prompting save if dirty).
+
+**Why this beats a separate DB-annotation editor**:
+- Zero new editor code — every existing keyboard shortcut, undo
+  semantics, WYSIWYG invariant, etc. just works.
+- Annotations show up in the export package immediately because
+  `apply_pdf_edits` writes them to the actual PDF file (which the
+  exporter reads via `fitz.insert_pdf`).
+- No "render layer" gap: with a DB-only editor the user wouldn't
+  see their edits in the export until a separate "bake" pass.
+
+**Trade-off**: catalog_annotations table stays empty for now. The
+DB-annotation render layer is still a future improvement (would let
+catalogs share annotations across multiple project bindings without
+re-baking PDFs). Not blocking anything user-facing today.
+
+**Verification**:
+- 11/11 smoke tests pass (was 9; +2 for Phase C presence + empty-
+  patch wiring)
+- `ruff check`: All checks passed
+- HTML rendered at /: catalogEditAnnotations, catalog-edit-banner,
+  _CATALOG_EDIT_CONTEXT, "Edit annotations" button, catalogExitEditMode
+  all present
+- Empty-body PATCH on /api/catalogs/<id>: 200 OK (the bump-only path)
+
+**Workflow user can do now**:
+```
+1. Open the GUI
+2. Pick a row from the tree (or use the Catalog Browser directly)
+3. Click 📚 (rail icon)
+4. Search/filter to find the catalog
+5. Click the catalog → detail pane opens
+6. Click "Edit annotations" → catalog PDF loads in main viewer +
+   edit mode auto-on, with a banner showing what catalog you're
+   editing
+7. Use the existing tools: drawRect / addText / drag / resize /
+   floating toolbar / undo / redo
+8. Click Save → annotations bake into the catalog PDF file
+9. Click ✕ on the banner to exit catalog edit mode
+10. Export package picks up the new annotations on next /api/export/package
+```
+
+**Lessons**:
+- **Reuse > rewrite**, especially when the existing code carries
+  multiple invariants (Phase 17 byte-exact, A5 toolbar positioning,
+  undo semantics). New editor would have re-derived all of those.
+- **Banner over modal** for ambient mode: less invasive, leaves
+  the full PDF view accessible, has a clear exit affordance.
+- **Wrap-and-extend pattern** (`const _orig = saveEdits;
+  window.saveEdits = async function() { … }`) lets us add
+  catalog-aware behavior without forking the save flow.

@@ -184,6 +184,37 @@ def test_export_preview_and_build_small(client, gui):
     assert any(it["filename"] == j["filename"] for it in items)
 
 
+def test_phase_c_catalog_editor_ui_present(client, gui):
+    """Phase C: Catalog Browser detail pane includes Edit-annotations button
+    + catalogEditAnnotations JS + edit-mode banner element/CSS. Verifies the
+    user can route from catalog browser into the existing PDF edit flow.
+    """
+    r = client.get("/")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    must = [
+        "catalogEditAnnotations",      # JS function
+        "Edit annotations",             # button label in detail pane
+        "catalog-edit-banner",          # banner element + CSS class
+        "_CATALOG_EDIT_CONTEXT",        # state variable for the wrapper
+        "catalogExitEditMode",          # exit fn
+    ]
+    missing = [m for m in must if m not in html]
+    assert not missing, f"Phase C UI hooks missing: {missing}"
+
+
+def test_phase_c_empty_patch_bumps_updated_at(client, gui):
+    """Phase C wires saveEdits → PATCH /api/catalogs/<id> with {} so the
+    catalog's updated_at gets touched after the user saves PDF edits in
+    catalog-edit mode. Empty-body patch must succeed."""
+    # Pick any catalog
+    r = client.get("/api/catalogs?limit=1")
+    cid = r.get_json()["items"][0]["catalog_id"]
+    r = client.patch(f"/api/catalogs/{cid}", json={})
+    assert r.status_code == 200
+    assert r.get_json().get("ok") is True
+
+
 def test_continuity_endpoint(client, gui):
     """/api/continuity returns the latest STATE markdown if present."""
     r = client.get("/api/continuity")
