@@ -675,3 +675,109 @@ should be able to see *why* the AI is proposing X and override it
 with full context. Also doubles as a debug tool: if a wrong pattern
 keeps firing, the user can spot it here and disable the rule from
 the rail's Learn panel.
+
+---
+
+## Phase 1 — Claude Code as core (Agent SDK + SSE streaming)
+
+**Goal**: Replace the API-direct provider with the **Claude Agent
+SDK** so the user's existing **Claude Max** subscription powers all
+LLM work (no metered API charges, $5/day cap removed). Frontend now
+shows Claude's reasoning live — thinking → tool calls → final
+proposal — instead of a black-box single-shot.
+
+**Why**: User subscribes to Claude Max ($200/mo) and was paying API
+costs separately. Phase 1 collapses both into one auth path while
+also unlocking richer agentic tool use (Read + Grep + custom MCP
+tools) and live HITL teaching.
+
+**Built**:
+- New module `app/claude_code_provider.py` (~470 LOC):
+  - `ClaudeCodeProvider` — drop-in for `AnthropicProvider` (same
+    `propose(row_context, few_shot)` signature, same `llm_calls` row
+    shape). Adds `propose_streaming()` async generator.
+  - 3 MCP custom tools registered via `create_sdk_mcp_server`:
+    - `mcp__comply__propose_col_d` (typical case)
+    - `mcp__comply__propose_brand_model` (section_header brand_model)
+    - `mcp__comply__escalate_to_user` (cannot decide)
+  - System prompt = SKILL.md + KB.md + pitfalls.md + top 30 learned
+    patterns. Cached for 60 s.
+  - Allowed tools: `Read`, `Grep`, plus the 3 MCP tools. **No Edit/
+    Write** — proposals always go through the user-confirm UI.
+  - `permission_mode="default"` (Claude asks before unexpected
+    operations).
+  - Auth detection: `~/.claude.json` exists → `claude_max`;
+    `ANTHROPIC_API_KEY` set → `api_key`; else → `none`.
+
+- New endpoint `GET /api/claude/stream?row=N` (Server-Sent Events):
+  - Streams events as Claude works:
+    - `{type:"thinking", text:...}`
+    - `{type:"tool_use", name:..., input:{...}}` (Read/Grep/propose_*)
+    - `{type:"tool_result", name:..., text:...}`
+    - `{type:"text", content:...}` (any narration)
+    - `{type:"result", proposal:{...}, elapsed_ms, cost_usd}`
+    - `{type:"error", error:...}`
+  - Async-generator → sync-Flask bridge via private event loop per
+    request (single-user assumption — ok for desktop tool).
+
+- AI pane: new "Run with Claude Code" section (Phase A1's pane gets
+  a third panel below Proposal). Renders streaming events as
+  color-coded chips:
+  - Cyan = thinking
+  - Orange = tool_use (with arrow `→`)
+  - Green = tool_result (with arrow `←`)
+  - Indigo = narration text
+  - Red = error
+  - Final result card has `Accept` / `Reject` buttons that wire to
+    existing `/api/row/col_d` save flow + `/api/learn/feedback`.
+
+- Settings UI:
+  - Status card now reads `provider_kind` (`claude_code` /
+    `anthropic_api` / `off`) and renders different copy per mode.
+  - API key form is moved into a `<details>` collapsible labelled
+    "API key fallback (only if Claude Max not available)".
+  - When `provider_kind === 'claude_code'` and `auth_mode ===
+    'claude_max'`, shows green "Claude Max OAuth" pill.
+
+- Status bar (`#sb-claude`):
+  - Claude Max mode: shows `model · Max · N calls`.
+  - API mode: shows `model · $0.10/$5` (legacy).
+
+- Boot logic: tries Claude Code first, falls back to Anthropic API.
+  `COMPLY_LLM=claude_code` (default) / `COMPLY_LLM=anthropic` (legacy)
+  / unset = first available.
+
+- Launcher (`start_verify_gui.command`):
+  - Now requires Python 3.10+ (claude-agent-sdk dependency). Probes
+    `python3.13 / 3.12 / 3.11 / 3.10 / python3` in order.
+  - Auto-installs `claude-agent-sdk` along with flask/openpyxl/etc.
+  - Optional offer to `npm install -g @anthropic-ai/claude-code` on
+    first run.
+  - Detects unauthenticated CLI and prompts user to run `claude auth
+    login` (3-second timeout, doesn't block).
+
+**One-time setup the user must do**:
+1. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
+2. Authenticate: `claude auth login` → opens browser OAuth → Claude
+   Max subscription detected
+3. Restart the GUI → status badge flips to green "Claude Max OAuth"
+
+**Verification**:
+- Python `ast.parse` + `node --check` of extracted JS: ✓
+- Flask test client boot + endpoint registration: ✓ 46 routes
+  registered, `/api/claude/stream` present
+- Provider initialization: ✓ `SDK_AVAILABLE=True`,
+  `provider_kind=claude_code`, `auth_mode=claude_max`
+- SSE pipeline end-to-end: ✓ stream returns 200, events parsed,
+  error paths surface helpful "run claude auth login" hint to user
+- Live agent run (with auth): deferred until user runs
+  `claude auth login`
+
+**Phase 2 (deferred)**: more domain-specific MCP tools so Claude
+operates at a higher level than raw filesystem (`get_row(N)`,
+`find_text_in_pdf(rel, query)`, `check_pattern_for_section(s)`,
+`save_proposed_col_d(N, text, conf)`). With those, we can drop
+`Read`/`Grep` from `allowed_tools` entirely.
+
+**Phase 3 (deferred)**: deeper HITL — "Pin this correction as a
+rule", "Always skip rows like this", per-row conversation logs.

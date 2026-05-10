@@ -34,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from flask import Flask, abort, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, abort, jsonify, render_template_string, request, send_file
 
 try:
     import fitz  # PyMuPDF
@@ -4774,14 +4774,36 @@ def api_settings_save_api_key():
 
 @app.route("/api/learn/llm_status")
 def api_learn_llm_status():
-    """LLM provider info + budget snapshot (Sprint S3 — surfaced in Settings)."""
+    """LLM provider info + budget snapshot (Sprint S3 — surfaced in Settings).
+
+    Phase 1 (Claude Code as core): try Claude Code provider FIRST, fall back
+    to Anthropic API provider. Returns a ``provider_kind`` field so the UI
+    can render the right copy ('Claude Max OAuth' vs 'API key + budget').
+    """
     base = learning.llm_status()
+    base["provider_kind"] = "off"
+    # Try Claude Code first
     try:
-        from app import anthropic_provider as ap
-        p = ap.get_provider()
+        from app import claude_code_provider as cp
+        p = cp.get_provider()
         if p:
             base.update(p.budget_status())
-            # Today's call count + last call info
+            base["provider_kind"] = "claude_code"
+    except Exception as e:
+        base["error_claude_code"] = str(e)
+    # Fall back to Anthropic API
+    if base.get("provider_kind") == "off":
+        try:
+            from app import anthropic_provider as ap
+            p = ap.get_provider()
+            if p:
+                base.update(p.budget_status())
+                base["provider_kind"] = "anthropic_api"
+        except Exception as e:
+            base["error_anthropic"] = str(e)
+    # Today's call count + last call info (works for both providers)
+    if base.get("provider_kind") != "off":
+        try:
             with db.conn() as c:
                 row = c.execute(
                     """SELECT COUNT(*) AS n,
@@ -4800,9 +4822,109 @@ def api_learn_llm_status():
                         "tokens_cache_read_today": row["cache_read"],
                         "last_call_ts": row["last_ts"],
                     })
-    except Exception as e:
-        base["error"] = str(e)
+        except Exception as e:
+            base["error_calls"] = str(e)
     return jsonify(base)
+
+
+@app.route("/api/claude/stream")
+def api_claude_stream():
+    """Phase 1 (Claude Code as core): stream Claude's reasoning live via SSE.
+
+    Frontend opens an EventSource on this endpoint per row. Each line is a
+    JSON event from ``ClaudeCodeProvider.propose_streaming``:
+      • {type:"thinking", text:...}
+      • {type:"tool_use",  name:..., input:{...}}     ← Read/Grep/propose_*
+      • {type:"tool_result", name:..., text:...}
+      • {type:"text",      content:...}
+      • {type:"result",    proposal:{...}, usage:{...}, cost_usd, elapsed_ms}
+      • {type:"error",     error:...}
+
+    The endpoint runs the async generator on a private event loop in this
+    request's thread (Flask is sync). For one user that's plenty; if we
+    ever scale, swap to Hypercorn/Quart.
+    """
+    try:
+        row_num = int(request.args.get("row", "0"))
+    except ValueError:
+        return jsonify({"ok": False, "error": "row required"}), 400
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    # Lazy-import to keep boot fast when SDK isn't installed
+    try:
+        from app import claude_code_provider as cp
+    except ImportError:
+        return jsonify({"ok": False, "error": "claude-agent-sdk not installed"}), 503
+    p = cp.get_provider()
+    if p is None:
+        return jsonify({
+            "ok": False,
+            "error": "Claude Code provider unavailable",
+            "hint": "Set COMPLY_LLM=claude_code and ensure 'claude' CLI is logged in",
+        }), 503
+
+    # Build row_context the same shape AnthropicProvider expects
+    role_info = detect_row_role(row_num)
+    pdf_filename = None
+    if row.get("pdf_rel"):
+        pdf_filename = Path(row["pdf_rel"]).name
+    # Lightweight rule-based proposal as a hint for Claude
+    rule_plan = None
+    try:
+        rp = auto_annotate_plan(row_num)
+        if rp.get("ok"):
+            rule_plan = {
+                "proposed_d": rp.get("proposed_d", ""),
+                "generator": rp.get("generator", ""),
+                "confidence": rp.get("confidence", 0),
+            }
+    except Exception:
+        pass
+    row_context = {
+        "row": row_num,
+        "section": row.get("section_inferred"),
+        "role": role_info.get("role", "unknown"),
+        "col_a": row.get("A"),
+        "col_b": row.get("B", ""),
+        "col_c_current": row.get("C", ""),
+        "col_d_current": row.get("D", ""),
+        "col_e": row.get("E", ""),
+        "pdf_rel": row.get("pdf_rel"),
+        "pdf_filename": pdf_filename,
+        "rule_proposal": rule_plan,
+    }
+
+    import asyncio as _aio
+
+    def event_stream():
+        loop = _aio.new_event_loop()
+        try:
+            agen = p.propose_streaming(row_context=row_context)
+            agen_iter = agen.__aiter__()
+            while True:
+                try:
+                    event = loop.run_until_complete(agen_iter.__anext__())
+                except StopAsyncIteration:
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as e:
+            err = {"type": "error", "error": str(e)}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",       # disable nginx buffering if proxied
+        "Connection": "keep-alive",
+    }
+    return Response(event_stream(), mimetype="text/event-stream", headers=headers)
 
 
 @app.route("/api/learn/feedback", methods=["POST"])
@@ -5605,6 +5727,132 @@ body[data-mode="apply"] .ribbon-mode-bar.mode-apply { display: flex; }
 .ai-actions button.ai-accept:hover { background: var(--c-success-hover); }
 .ai-actions button.ai-edit:hover { background: var(--c-surface-2); border-color: var(--c-primary); color: var(--c-primary-text); }
 .ai-actions button.ai-reject:hover { background: var(--c-danger-soft); border-color: var(--c-danger); color: var(--c-danger-text); }
+
+/* ── Phase 1: Claude Code live runner ───────────────────────── */
+.ai-claude-live { position: relative; }
+.ai-claude-actions {
+  display: flex; gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+.ai-claude-actions button {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--t-sm); font-weight: 600;
+  cursor: pointer;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.ai-claude-actions button.ai-claude-run {
+  background: var(--c-primary, #4f46e5);
+  color: white; border-color: var(--c-primary, #4f46e5);
+}
+.ai-claude-actions button.ai-claude-run:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.ai-claude-actions button:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+.ai-claude-log {
+  max-height: 360px; overflow-y: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-bg-soft);
+  padding: var(--s-2);
+  font-family: var(--f-mono, "SF Mono", monospace);
+  font-size: 11.5px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.ai-claude-log:empty::before {
+  content: '— กด Run เพื่อให้ Claude วิเคราะห์ row นี้ —';
+  display: block;
+  padding: var(--s-3);
+  color: var(--c-text-faint);
+  font-style: italic;
+  font-family: var(--f-base);
+  font-size: var(--t-xs);
+  text-align: center;
+}
+.ai-claude-log.streaming {
+  border-color: var(--c-primary, #4f46e5);
+  box-shadow: 0 0 0 2px var(--c-primary-soft, rgba(79,70,229,0.12));
+}
+.ai-claude-log .aclog {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 2px solid var(--c-border);
+  background: var(--c-surface);
+  white-space: pre-wrap; word-break: break-word;
+}
+.ai-claude-log .aclog.sys      { color: var(--c-text-faint); border-left-color: var(--c-text-faint); font-style: italic; }
+.ai-claude-log .aclog.thinking { color: var(--c-text-soft); border-left-color: var(--c-info, #06b6d4); background: rgba(6,182,212,0.04); }
+.ai-claude-log .aclog.tool     { color: var(--c-text); border-left-color: var(--c-warn); background: var(--c-warn-soft); font-weight: 500; }
+.ai-claude-log .aclog.tool::before { content: '→ '; color: var(--c-warn-text); }
+.ai-claude-log .aclog.tool-res { color: var(--c-text-soft); border-left-color: var(--c-success); padding-left: 16px; }
+.ai-claude-log .aclog.tool-res::before { content: '← '; color: var(--c-success); }
+.ai-claude-log .aclog.tool-err { color: var(--c-danger-text); border-left-color: var(--c-danger); background: var(--c-danger-soft); }
+.ai-claude-log .aclog.text     { color: var(--c-text); border-left-color: var(--c-primary, #4f46e5); }
+.ai-claude-log .aclog.err      { color: var(--c-danger-text); border-left-color: var(--c-danger); background: var(--c-danger-soft); font-weight: 600; }
+.ai-claude-log .aclog.result {
+  margin-top: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--c-success);
+  border-left-width: 4px;
+  background: var(--c-success-soft);
+  border-radius: var(--r-md);
+  font-family: var(--f-base);
+  font-size: var(--t-sm);
+}
+.ai-claude-log .aclog-result-head {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: var(--s-2);
+  color: var(--c-success-text);
+}
+.ai-claude-log .aclog-result-head .ac-meta {
+  margin-left: auto;
+  font-size: 11px; color: var(--c-text-faint);
+  font-family: var(--f-mono);
+}
+.ai-claude-log .aclog-result-text {
+  font-family: var(--f-mono);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface);
+  border-radius: var(--r-sm);
+  margin-bottom: var(--s-2);
+  word-break: break-all;
+}
+.ai-claude-log .aclog-result-conf {
+  font-size: 11px; color: var(--c-text-soft);
+  margin-bottom: var(--s-2);
+}
+.ai-claude-log .aclog-result-rat {
+  font-size: var(--t-xs);
+  font-style: italic;
+  color: var(--c-text-muted);
+  margin-bottom: var(--s-2);
+}
+.ai-claude-log .aclog-result-actions {
+  display: flex; gap: var(--s-2);
+}
+.ai-claude-log .aclog-result-actions button {
+  flex: 1;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--t-xs); font-weight: 600;
+  cursor: pointer;
+}
+.ai-claude-log .aclog-result-actions button.ai-accept {
+  background: var(--c-success); color: white; border-color: var(--c-success);
+}
+.ai-claude-log .aclog-result-actions button.ai-reject:hover {
+  background: var(--c-danger-soft); border-color: var(--c-danger); color: var(--c-danger-text);
+}
 
 /* Teach-back textarea */
 .ai-teach textarea {
@@ -8650,11 +8898,13 @@ body[data-embedded="1"] .kbd-help { display: none; }
         </select>
       </label>
       <div>
-        <strong>LLM provider — Anthropic Claude</strong>
-        <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block;margin-bottom:var(--s-3)">Claude refines low-confidence rule proposals · saves to <code>.env</code> (gitignored)</span>
+        <strong>LLM provider — Claude (Code or API)</strong>
+        <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block;margin-bottom:var(--s-3)">Phase 1: <strong>Claude Code</strong> via OAuth uses your <strong>Claude Max</strong> subscription (no metered API charges). API key path remains as fallback.</span>
         <div id="settings-llm-card" style="background:var(--c-surface-2);border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-5);font-size:var(--t-sm);display:flex;flex-direction:column;gap:var(--s-4)">
           <div id="settings-llm-status" style="font-family:var(--f-mono)">loading…</div>
-          <div style="display:flex;flex-direction:column;gap:var(--s-2)">
+          <details style="font-size:var(--t-xs);color:var(--c-text-soft)">
+            <summary style="cursor:pointer;color:var(--c-text-muted);font-weight:600">API key fallback (only if Claude Max not available)</summary>
+          <div style="display:flex;flex-direction:column;gap:var(--s-2);margin-top:var(--s-3)">
             <label style="font-size:var(--t-sm);color:var(--c-text-muted);font-weight:600">API key</label>
             <div style="display:flex;gap:var(--s-2)">
               <input type="password" id="settings-api-key" placeholder="sk-ant-…" style="flex:1;font-family:var(--f-mono);font-size:var(--t-sm)" autocomplete="off" spellcheck="false">
@@ -8680,6 +8930,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
             <button class="btn btn-danger" type="button" onclick="clearApiKey()" id="settings-clear-key" style="font-size:var(--t-sm)">Clear key</button>
             <button class="btn btn-primary" type="button" onclick="saveApiKey()" id="settings-save-key" style="font-size:var(--t-sm)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save &amp; activate</span></button>
           </div>
+          </details>
         </div>
       </div>
       <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
@@ -12901,10 +13152,36 @@ async function clearApiKey() {
 function refreshLlmStatusCard(j) {
   const el = document.getElementById('settings-llm-status');
   if (!el) return;
-  if (!j.available || j.name === 'off') {
-    el.innerHTML = `<span style="color:var(--c-text-faint)">OFF — paste API key below to enable</span>`;
+  if (!j.available || j.name === 'off' || j.provider_kind === 'off') {
+    el.innerHTML = `
+      <div style="color:var(--c-text-faint)">OFF</div>
+      <div style="font-size:var(--t-xs);color:var(--c-text-muted);margin-top:var(--s-2)">
+        ▸ <strong>Recommended</strong>: install Claude Code CLI (<code style="background:var(--c-surface);padding:1px 4px;border-radius:3px">npm i -g @anthropic-ai/claude-code</code>),
+        run <code style="background:var(--c-surface);padding:1px 4px;border-radius:3px">claude login</code>, then set <code>COMPLY_LLM=claude_code</code> and restart.<br>
+        ▸ <em>Or</em> paste an API key below as fallback.
+      </div>`;
     return;
   }
+  // Phase 1: Claude Code via Claude Max OAuth
+  if (j.provider_kind === 'claude_code') {
+    const auth = j.auth_mode || 'unknown';
+    const authBadge = auth === 'claude_max'
+      ? '<span style="background:var(--c-success-soft);color:var(--c-success-text);padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">Claude Max OAuth</span>'
+      : `<span style="background:var(--c-warn-soft);color:var(--c-warn-text);padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">${escapeHtml(auth)}</span>`;
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;margin-bottom:var(--s-2);align-items:center">
+        <span style="color:var(--c-success-text);font-weight:600">● ${escapeHtml(j.model || 'claude-code')}</span>
+        ${authBadge}
+      </div>
+      <div style="margin-bottom:var(--s-2);font-size:var(--t-xs);color:var(--c-text-muted)">
+        ${j.calls_today || 0} calls today · agentic mode (Read + Grep + custom MCP tools)
+      </div>
+      <div style="font-size:var(--t-xs);color:var(--c-text-faint)">
+        💡 Cost = subscription (no per-call charge). Each row run = 1 agentic loop, may take 10–30 s.
+      </div>`;
+    return;
+  }
+  // Anthropic API path (legacy)
   const spentPct = j.budget_usd_per_day
     ? Math.round((j.spent_today_usd || 0) / j.budget_usd_per_day * 100)
     : 0;
@@ -12914,7 +13191,7 @@ function refreshLlmStatusCard(j) {
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;margin-bottom:var(--s-2)">
       <span style="color:var(--c-success-text);font-weight:600">● ${escapeHtml(j.model || j.name)}</span>
-      <span style="color:var(--c-text-soft)">${j.calls_today || 0} calls today</span>
+      <span style="background:var(--c-bg-soft);color:var(--c-text-soft);padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">API key (metered)</span>
     </div>
     <div style="margin-bottom:var(--s-2);font-size:var(--t-xs)">
       <span style="color:var(--c-text-muted)">Tokens:</span>
@@ -13113,6 +13390,24 @@ function aiPaneRender(row, plan) {
       <button class="ai-send" onclick="aiTeachSend()">Send to Claude</button>
     </div>`;
 
+  // Phase 1 (Claude Code as core): Live agent run — user clicks Run, the
+  // SSE endpoint streams Claude's reasoning + tool calls + final proposal.
+  const liveSection = `
+    <div class="ai-section ai-claude-live" id="ai-claude-live-section">
+      <h4>${ico('sparkles',14)}<span>Run with Claude Code</span>
+        <span style="margin-left:auto;font-size:11px;font-weight:500;color:var(--c-text-faint);text-transform:none;letter-spacing:0">live · agentic</span>
+      </h4>
+      <div class="ai-claude-actions">
+        <button class="ai-claude-run" id="ai-claude-run-btn" onclick="aiClaudeRun()" title="Run Claude with full tool use (Read/Grep + custom tools). Watch reasoning live.">
+          ${ico('zap',14)}<span>Run</span>
+        </button>
+        <button class="ai-claude-stop" id="ai-claude-stop-btn" onclick="aiClaudeStop()" disabled>
+          ${ico('x',14)}<span>Stop</span>
+        </button>
+      </div>
+      <div class="ai-claude-log" id="ai-claude-log" aria-label="Claude live reasoning"></div>
+    </div>`;
+
   // Recent corrections (compact)
   const recentSection = `
     <div class="ai-section">
@@ -13120,7 +13415,7 @@ function aiPaneRender(row, plan) {
       <div id="ai-recent" style="font-size:var(--t-xs);color:var(--c-text-soft);font-family:var(--f-mono)">loading…</div>
     </div>`;
 
-  body.innerHTML = propSection + teachSection + recentSection;
+  body.innerHTML = propSection + liveSection + teachSection + recentSection;
   // Lazy-load recent corrections
   fetch('/api/learn/stats').then(r => r.json()).then(j => {
     const el = document.getElementById('ai-recent');
@@ -13241,6 +13536,203 @@ async function aiTeachSend() {
   } catch (e) { toast('Send error', e.message, 'error', 4000); }
 }
 
+// ── Phase 1: Claude Code live-streaming runner ────────────────
+// Opens an EventSource on /api/claude/stream, renders each event as a
+// chip in the live log, fills in the proposal at completion.
+let _CLAUDE_ES = null;
+
+function aiClaudeRun() {
+  if (!SELECTED_ROW) {
+    toast('Pick a row first', 'เลือก row จาก tree', 'warn', 2500);
+    return;
+  }
+  if (_CLAUDE_ES) { try { _CLAUDE_ES.close(); } catch(e){} _CLAUDE_ES = null; }
+  const log = document.getElementById('ai-claude-log');
+  const runBtn = document.getElementById('ai-claude-run-btn');
+  const stopBtn = document.getElementById('ai-claude-stop-btn');
+  if (!log) return;
+  log.innerHTML = '';
+  log.classList.add('streaming');
+  if (runBtn)  runBtn.disabled = true;
+  if (stopBtn) stopBtn.disabled = false;
+  _aiClaudeAppend(log, 'sys', `Asking Claude to analyze R${SELECTED_ROW}…`);
+
+  const url = `/api/claude/stream?row=${SELECTED_ROW}`;
+  const es = new EventSource(url);
+  _CLAUDE_ES = es;
+
+  es.onmessage = (e) => {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch (err) { return; }
+    if (!evt || !evt.type) return;
+    switch (evt.type) {
+      case 'thinking':
+        _aiClaudeAppend(log, 'thinking', evt.text || '');
+        break;
+      case 'tool_use':
+        _aiClaudeAppend(log, 'tool', `${evt.name}(${_aiClaudeShort(evt.input)})`);
+        break;
+      case 'tool_result':
+        _aiClaudeAppend(log, evt.is_error ? 'tool-err' : 'tool-res',
+                         (evt.text || '').slice(0, 200));
+        break;
+      case 'text':
+        _aiClaudeAppend(log, 'text', evt.content || '');
+        break;
+      case 'result':
+        _aiClaudeFinish(log, evt);
+        es.close(); _CLAUDE_ES = null;
+        if (runBtn)  runBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = true;
+        log.classList.remove('streaming');
+        break;
+      case 'error':
+        const errStr = String(evt.error || 'unknown error');
+        _aiClaudeAppend(log, 'err', errStr);
+        // Common helpful hint: not-logged-in
+        if (/not logged in|please run .?login|auth login/i.test(errStr) ||
+            errStr.includes('returned an error')) {
+          const hint = document.createElement('div');
+          hint.className = 'aclog sys';
+          hint.style.borderLeftColor = 'var(--c-warn)';
+          hint.style.background = 'var(--c-warn-soft)';
+          hint.style.color = 'var(--c-warn-text)';
+          hint.style.fontStyle = 'normal';
+          hint.style.fontWeight = '600';
+          hint.innerHTML = 'ℹ Run <code style="background:var(--c-surface);padding:1px 4px;border-radius:3px">claude auth login</code> in a terminal once to authenticate (uses Claude Max subscription).';
+          log.appendChild(hint);
+        }
+        es.close(); _CLAUDE_ES = null;
+        if (runBtn)  runBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = true;
+        log.classList.remove('streaming');
+        break;
+    }
+  };
+  es.onerror = () => {
+    _aiClaudeAppend(log, 'err', 'Stream disconnected');
+    try { es.close(); } catch (e) {}
+    _CLAUDE_ES = null;
+    if (runBtn)  runBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+    log.classList.remove('streaming');
+  };
+  es.addEventListener('done', () => {
+    try { es.close(); } catch (e) {}
+    _CLAUDE_ES = null;
+    if (runBtn)  runBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+    log.classList.remove('streaming');
+  });
+}
+
+function aiClaudeStop() {
+  if (_CLAUDE_ES) {
+    try { _CLAUDE_ES.close(); } catch(e) {}
+    _CLAUDE_ES = null;
+  }
+  const log = document.getElementById('ai-claude-log');
+  if (log) {
+    _aiClaudeAppend(log, 'sys', '⏹ Stopped by user');
+    log.classList.remove('streaming');
+  }
+  const runBtn = document.getElementById('ai-claude-run-btn');
+  const stopBtn = document.getElementById('ai-claude-stop-btn');
+  if (runBtn)  runBtn.disabled = false;
+  if (stopBtn) stopBtn.disabled = true;
+}
+
+function _aiClaudeAppend(log, kind, text) {
+  const el = document.createElement('div');
+  el.className = 'aclog ' + kind;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function _aiClaudeShort(input) {
+  if (!input) return '';
+  try {
+    if (typeof input === 'string') return input.slice(0, 60);
+    const s = JSON.stringify(input);
+    return s.length > 80 ? s.slice(0, 77) + '…' : s;
+  } catch (e) { return ''; }
+}
+
+function _aiClaudeFinish(log, evt) {
+  const prop = evt.proposal;
+  const ms   = evt.elapsed_ms || 0;
+  const cost = (evt.cost_usd || 0).toFixed(4);
+  const wrap = document.createElement('div');
+  wrap.className = 'aclog result';
+  if (prop && prop.input) {
+    const txt = prop.input.col_d_text || prop.input.col_d || prop.input.brand || '(see details)';
+    const conf = prop.input.confidence || 0;
+    wrap.innerHTML = `
+      <div class="aclog-result-head">
+        ${ico('check',12)}<strong>${escapeHtml(prop.name)}</strong>
+        <span class="ac-meta">${ms}ms · $${cost}</span>
+      </div>
+      <div class="aclog-result-text">${escapeHtml(txt)}</div>
+      <div class="aclog-result-conf">conf: ${(conf*100).toFixed(0)}%</div>
+      ${prop.input.rationale ? `<div class="aclog-result-rat">${escapeHtml(prop.input.rationale)}</div>` : ''}
+      <div class="aclog-result-actions">
+        <button class="ai-accept" onclick='aiClaudeAccept(${JSON.stringify(prop).replace(/'/g, "&apos;")})'>${ico('check',13)}<span>Accept</span></button>
+        <button class="ai-reject" onclick='aiClaudeReject(${JSON.stringify(prop).replace(/'/g, "&apos;")})'>${ico('x',13)}<span>Reject</span></button>
+      </div>`;
+  } else {
+    wrap.innerHTML = `
+      <div class="aclog-result-head">
+        ${ico('alert',12)}<strong>No proposal</strong>
+        <span class="ac-meta">${ms}ms</span>
+      </div>
+      <div class="aclog-result-rat">Claude finished without calling a structured tool. See log above.</div>`;
+  }
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function aiClaudeAccept(proposal) {
+  if (!SELECTED_ROW || !proposal || !proposal.input) return;
+  const text = proposal.input.col_d_text || '';
+  if (!text) { toast('No text to apply', 'Proposal ไม่มี col_d_text', 'warn', 3000); return; }
+  try {
+    const r = await fetch('/api/row/col_d', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({row: SELECTED_ROW, col_d: text, original: ROWS_BY_NUM[SELECTED_ROW]?.D || ''}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Accepted', `R${SELECTED_ROW} Col D updated`, 'learn', 3500);
+      if (typeof tickRetrain === 'function') tickRetrain('claude_accept');
+      if (SELECTED_ROW) loadXlsx(SELECTED_ROW);
+    } else { toast('Save failed', j.error || 'unknown', 'error', 4000); }
+  } catch (e) { toast('Save error', e.message, 'error', 4000); }
+}
+
+async function aiClaudeReject(proposal) {
+  // Record as a learning signal — Claude proposed X, user rejected.
+  if (!SELECTED_ROW) return;
+  const row = ROWS_BY_NUM[SELECTED_ROW];
+  try {
+    await fetch('/api/learn/feedback', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        row_num: SELECTED_ROW,
+        section: row?.section,
+        input_b: row?.B || '',
+        suggested_d: proposal?.input?.col_d_text || '',
+        confidence: proposal?.input?.confidence || 0,
+        generator: 'claude_code',
+        provenance: {tool: proposal?.name},
+        user_action: 'rejected',
+        final_d: row?.D || '',
+      }),
+    });
+    toast('✓ Rejected', 'Logged as training signal', 'info', 2500);
+  } catch (e) { /* swallow */ }
+}
+
 // ── Status bar update ─────────────────────────────────────────
 function statusBarUpdate() {
   const sbRow = document.getElementById('sb-row-info');
@@ -13301,8 +13793,13 @@ async function statusBarClaude() {
     if (!sbC || !txt) return;
     if (j.available) {
       sbC.classList.add('online'); sbC.classList.remove('offline');
-      txt.textContent = `${j.model || j.name} · $${(j.spent_today_usd || 0).toFixed(2)}/$${(j.budget_usd_per_day || 5).toFixed(0)}`;
-      // Also update header
+      // Phase 1: Claude Code via Max OAuth → no $/day, just label
+      if (j.provider_kind === 'claude_code') {
+        const auth = j.auth_mode === 'claude_max' ? 'Max' : (j.auth_mode || '');
+        txt.textContent = `${j.model || 'claude-code'} · ${auth} · ${j.calls_today || 0} calls`;
+      } else {
+        txt.textContent = `${j.model || j.name} · $${(j.spent_today_usd || 0).toFixed(2)}/$${(j.budget_usd_per_day || 5).toFixed(0)}`;
+      }
       const h = document.getElementById('ai-pane-head');
       const sub = document.getElementById('ai-pane-sub');
       if (h) h.setAttribute('data-status', 'online');
@@ -13419,19 +13916,38 @@ def boot() -> None:
     # Load .env file (if present) so ANTHROPIC_API_KEY etc. are available
     _load_dotenv(ROOT / ".env")
 
-    # Install Claude provider (no-op if key missing or COMPLY_LLM != 'anthropic')
-    try:
-        from app import anthropic_provider as ap
-        if ap.install_into_learning():
-            p = ap.get_provider()
-            bs = p.budget_status() if p else {}
-            print(f"[boot] Claude provider installed: model={bs.get('model')} "
-                  f"budget=${bs.get('budget_usd_per_day'):.2f}/day "
-                  f"spent_today=${bs.get('spent_today_usd', 0):.2f}")
-        else:
-            print(f"[boot] Claude provider OFF (set COMPLY_LLM=anthropic + ANTHROPIC_API_KEY to enable)")
-    except Exception as e:
-        sys.stderr.write(f"[boot] Claude install failed: {e}\n")
+    # Install Claude provider — Claude Code (Agent SDK) takes priority over
+    # API direct, since Phase 1 uses Claude Max OAuth (no metered API costs).
+    # Set COMPLY_LLM=claude_code (default) or =anthropic for the legacy path.
+    _llm_mode = (os.environ.get("COMPLY_LLM") or "claude_code").lower()
+    if _llm_mode in ("claude_code", "claude-code"):
+        try:
+            from app import claude_code_provider as cp
+            if cp.install_into_learning():
+                p = cp.get_provider()
+                bs = p.budget_status() if p else {}
+                print(f"[boot] Claude Code provider installed: model={bs.get('model')} "
+                      f"auth={bs.get('auth_mode')} (Max = unlimited)")
+            else:
+                if not cp.SDK_AVAILABLE:
+                    print(f"[boot] Claude Code provider OFF (claude-agent-sdk not installed)")
+                else:
+                    print(f"[boot] Claude Code provider OFF (set COMPLY_LLM=claude_code to enable)")
+        except Exception as e:
+            sys.stderr.write(f"[boot] Claude Code install failed: {e}\n")
+    elif _llm_mode == "anthropic":
+        try:
+            from app import anthropic_provider as ap
+            if ap.install_into_learning():
+                p = ap.get_provider()
+                bs = p.budget_status() if p else {}
+                print(f"[boot] Anthropic API provider installed: model={bs.get('model')} "
+                      f"budget=${bs.get('budget_usd_per_day'):.2f}/day "
+                      f"spent_today=${bs.get('spent_today_usd', 0):.2f}")
+            else:
+                print(f"[boot] Anthropic API provider OFF (set ANTHROPIC_API_KEY to enable)")
+        except Exception as e:
+            sys.stderr.write(f"[boot] Anthropic install failed: {e}\n")
 
     # Always-load-latest invariant: ensure the latest snapshot reflects the
     # current working state, OR surface a divergence the user must resolve.

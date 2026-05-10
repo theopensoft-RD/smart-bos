@@ -718,6 +718,62 @@ menu). Debounced 250 ms input; Tab/Enter accepts, ArrowUp/Down
 navigates. The panel closes when the editor blurs (with a 120 ms
 delay so a click on a suggestion is processed first).
 
+### 12.10f Claude Code as core provider (Phase 1)
+
+The module `app/claude_code_provider.py` is the new primary LLM
+boundary. It uses the **Claude Agent SDK** (`claude-agent-sdk`
+package, requires Python 3.10+) which spawns `claude` CLI as a
+subprocess transport — same engine that powers Claude Code in IDE.
+
+```
+   Flask request /api/claude/stream?row=N
+              │
+              ▼
+   ClaudeCodeProvider.propose_streaming(row_context)
+              │
+              ▼  (claude_agent_sdk.query)
+   subprocess: claude --print --input-format stream-json …
+              │
+              │  uses ~/.claude.json OAuth token (Claude Max)
+              │
+              ▼
+   AssistantMessage / UserMessage / ResultMessage events
+              │
+              ▼  (mapped to {type, …})
+   yield → Flask Response stream → SSE
+              │
+              ▼
+   Browser EventSource → AI pane chips
+```
+
+**Auth modes** (auto-detected by provider):
+| Mode | Trigger | Cost |
+|---|---|---|
+| `claude_max` | `~/.claude.json` exists (after `claude auth login`) | Subscription |
+| `api_key`    | `ANTHROPIC_API_KEY` set                              | Metered |
+| `none`       | neither                                              | Provider unavailable |
+
+**Provider toggles** via env:
+- `COMPLY_LLM=claude_code` (default) → use new provider
+- `COMPLY_LLM=anthropic` → use legacy `anthropic_provider.py` (API direct)
+- `COMPLY_LLM=` (empty) → falls through `claude_code` first then `anthropic`
+
+**Tools Claude can invoke**:
+- `Read` (filesystem read — bounded to project cwd)
+- `Grep` (regex search)
+- `mcp__comply__propose_col_d`        — structured Col D proposal
+- `mcp__comply__propose_brand_model`  — brand+model decomposition
+- `mcp__comply__escalate_to_user`     — clarifying question
+
+**Permission mode**: `default` (Claude asks before tool not in
+`allowed_tools`). `Edit`/`Write`/`Bash` are NOT in the allowlist —
+all xlsx/PDF mutations go through the GUI's user-confirm flow.
+
+**Streaming is the default**: even for Phase 1, the legacy sync
+`propose()` is kept for the `learning.set_llm_provider` bridge so
+the existing low-confidence-refinement path still works. New UI
+calls go through `/api/claude/stream`.
+
 ### 12.10e Patterns-triggered subsection (Phase B5)
 
 `aiPaneRender()` reads `plan.provenance` (already shaped by

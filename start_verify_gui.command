@@ -19,29 +19,68 @@ cat <<'BANNER'
 
 BANNER
 
-# 1. ensure Python 3
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "❌ ไม่พบ python3 — กรุณาติดตั้ง Python 3 ก่อน (https://www.python.org)"
+# 1. ensure Python 3.10+ (claude-agent-sdk needs 3.10; we prefer 3.11)
+PY=""
+for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    ver=$("$cand" -c "import sys; print(sys.version_info[:2] >= (3,10))" 2>/dev/null)
+    if [ "$ver" = "True" ]; then
+      PY=$(command -v "$cand")
+      break
+    fi
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "❌ ไม่พบ Python 3.10+ — Phase 1 (Claude Code as core) ต้องใช้ 3.10 ขึ้นไป"
+  echo "   ติดตั้งผ่าน: brew install python@3.11"
   read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
   exit 1
 fi
+echo "▶  ใช้ $PY ($($PY --version))"
 
 # 2. ensure dependencies (install on first run)
 need_install=()
-python3 -c "import flask" 2>/dev/null || need_install+=("flask")
-python3 -c "import openpyxl" 2>/dev/null || need_install+=("openpyxl")
-python3 -c "import fitz" 2>/dev/null || need_install+=("pymupdf")
-python3 -c "import PIL" 2>/dev/null || need_install+=("pillow")
+$PY -c "import flask" 2>/dev/null || need_install+=("flask")
+$PY -c "import openpyxl" 2>/dev/null || need_install+=("openpyxl")
+$PY -c "import fitz" 2>/dev/null || need_install+=("pymupdf")
+$PY -c "import PIL" 2>/dev/null || need_install+=("pillow")
+$PY -c "import claude_agent_sdk" 2>/dev/null || need_install+=("claude-agent-sdk")
 
 if [ ${#need_install[@]} -gt 0 ]; then
   echo "⚙  ติดตั้ง dependency ครั้งแรก: ${need_install[*]}"
-  python3 -m pip install --user --quiet "${need_install[@]}" || {
+  $PY -m pip install --user --quiet "${need_install[@]}" || {
     echo "❌ ติดตั้ง dependency ไม่สำเร็จ"
     read -n 1 -s -r -p "กดปุ่มใดๆ เพื่อปิด..."
     exit 1
   }
   echo "✓ ติดตั้งเรียบร้อย"
   echo
+fi
+
+# 2b. ensure Claude Code CLI (npm package). Optional — only needed if
+# user wants Claude Max OAuth path. Skip silently if npm not present.
+if command -v npm >/dev/null 2>&1; then
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "ℹ Claude Code CLI ยังไม่ถูกติดตั้ง — ติดตั้งเพื่อใช้ Claude Max?"
+    echo "   (Enter เพื่อข้าม / 'y' เพื่อติดตั้งผ่าน npm -g)"
+    read -t 5 -r -n 1 ans || ans=""
+    echo
+    if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+      npm install -g @anthropic-ai/claude-code || echo "⚠ ติดตั้ง claude CLI ไม่สำเร็จ — ระบบจะใช้ rules-only mode"
+    fi
+  fi
+  # Check auth status if CLI present
+  if command -v claude >/dev/null 2>&1; then
+    auth_status=$(claude auth status 2>/dev/null | grep -o '"loggedIn":[^,]*' | head -1)
+    if echo "$auth_status" | grep -q "false"; then
+      echo
+      echo "⚠ Claude Code CLI ยังไม่ได้ login"
+      echo "   รัน 'claude auth login' ใน terminal อีกบานเพื่อใช้ Claude Max"
+      echo "   (กด Enter เพื่อข้าม — จะใช้ rules-only mode)"
+      read -t 3 -r -n 1 -s _ || true
+      echo
+    fi
+  fi
 fi
 
 # 3. kill any old instance on port 5173
@@ -52,7 +91,8 @@ if [ -n "$old_pid" ]; then
   sleep 0.5
 fi
 
-# 4. run
-echo "▶  starting…"
+# 4. run — default to claude_code provider (Phase 1)
+export COMPLY_LLM=${COMPLY_LLM:-claude_code}
+echo "▶  starting… (LLM=$COMPLY_LLM)"
 echo
-exec python3 comply_verify_gui.py
+exec "$PY" comply_verify_gui.py
