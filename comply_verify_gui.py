@@ -5390,6 +5390,56 @@ def api_export_list():
     return jsonify({"ok": True, "items": items[:50]})
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Continuity — handoff document between sessions
+# ─────────────────────────────────────────────────────────────────────
+
+@app.route("/api/continuity")
+def api_continuity():
+    """Return the latest continuity STATE markdown if present.
+
+    The Skill Agent (and any other long-running session) writes
+    `_continuity/STATE_<ts>.md` files when handing off. The GUI
+    surfaces the latest one as a top-bar banner so the operator sees
+    what was last done + pending user decisions.
+    """
+    cont_root = ROOT / "_continuity"
+    if not cont_root.exists():
+        return jsonify({"ok": True, "available": False})
+    files = sorted(cont_root.glob("STATE_*.md"))
+    if not files:
+        return jsonify({"ok": True, "available": False})
+    latest = files[-1]
+    try:
+        text = latest.read_text(encoding="utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    # Pull a short headline = first non-empty line that looks like a heading
+    headline = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        if line:
+            headline = line
+            break
+    return jsonify({
+        "ok": True,
+        "available": True,
+        "filename": latest.name,
+        "mtime": datetime.fromtimestamp(latest.stat().st_mtime).isoformat(timespec="seconds"),
+        "byte_size": latest.stat().st_size,
+        "headline": headline[:200],
+        "markdown": text,
+        "history": [
+            {"filename": f.name,
+             "mtime": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+             "byte_size": f.stat().st_size}
+            for f in reversed(files[:20])
+        ],
+    })
+
+
 @app.route("/api/learn/feedback", methods=["POST"])
 def api_learn_feedback():
     """Direct feedback recorder (e.g., when user edits Col D outside the
@@ -6526,6 +6576,26 @@ body[data-row-selected="0"] .status-bar .sb-vbtn { opacity: 0.4; pointer-events:
 }
 .topbar-context-label .ctx-section {
   color: var(--c-text-muted); font-weight: 500;
+}
+
+/* Continuity badge in topbar — shows when _continuity/STATE_*.md exists */
+.topbar-continuity {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; margin-left: var(--s-3);
+  border: 1px solid var(--c-warn);
+  background: var(--c-warn-soft);
+  color: var(--c-warn-text);
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 600;
+  cursor: pointer;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: filter 100ms;
+}
+.topbar-continuity:hover { filter: brightness(0.96); }
+.topbar-continuity #topbar-continuity-label {
+  overflow: hidden; text-overflow: ellipsis;
 }
 .topbar-context-label .ctx-meta {
   color: var(--c-text-soft);
@@ -8913,6 +8983,11 @@ body[data-embedded="1"] .kbd-help { display: none; }
     <button class="topbar-context" id="topbar-context" onclick="focusSelectedRow()" title="คลิกเพื่อโฟกัส row ปัจจุบันใน tree" style="display:none">
       <span class="topbar-context-label" id="topbar-context-label"></span>
     </button>
+    <!-- Continuity handoff badge — clickable, opens modal with full STATE.md -->
+    <button class="topbar-continuity" id="topbar-continuity" onclick="openContinuityModal()" title="ดู continuity state จาก session ก่อน" style="display:none">
+      <svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>
+      <span id="topbar-continuity-label">…</span>
+    </button>
     <div class="topbar-spacer"></div>
     <div class="topbar-actions">
       <button class="topbar-btn" onclick="openCmdK()" title="Command palette (⌘K)" aria-label="open command palette"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><span class="kbd" style="margin-left:4px">⌘K</span></button>
@@ -9613,6 +9688,27 @@ body[data-embedded="1"] .kbd-help { display: none; }
       <div id="catalog-detail" style="overflow-y:auto;padding:var(--s-5);min-height:0">
         <div style="padding:40px;color:var(--c-text-faint);text-align:center;font-style:italic">เลือก catalog จาก list ด้านซ้าย</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────── Continuity STATE modal ──────────── -->
+<div class="modal-bg" id="continuity-modal" role="dialog" aria-modal="true" aria-labelledby="continuity-modal-title" onclick="if(event.target.id==='continuity-modal') closeContinuityModal()">
+  <div class="modal" id="continuity-modal-inner" style="max-width:820px;width:96vw;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h3 id="continuity-modal-title" style="margin:0;display:flex;align-items:center;gap:8px">
+        <svg class="ico" aria-hidden="true"><use href="#i-clock"/></svg>
+        <span>Session continuity</span>
+        <span id="continuity-meta" style="margin-left:6px;font-weight:500;font-size:var(--t-xs);color:var(--c-text-soft);background:var(--c-bg-soft);padding:2px 8px;border-radius:999px"></span>
+      </h3>
+      <button class="modal-close" onclick="closeContinuityModal()" aria-label="close">✕</button>
+    </div>
+    <div style="padding:var(--s-5);overflow-y:auto;flex:1">
+      <div id="continuity-body" style="font-family:var(--f-mono);font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--c-text);background:var(--c-bg-soft);padding:var(--s-4);border-radius:var(--r-md);border:1px solid var(--c-border)">loading…</div>
+      <details style="margin-top:var(--s-4);font-size:var(--t-xs);color:var(--c-text-soft)">
+        <summary style="cursor:pointer;font-weight:600">Previous handoffs</summary>
+        <div id="continuity-history" style="margin-top:6px;font-family:var(--f-mono)"></div>
+      </details>
     </div>
   </div>
 </div>
@@ -13013,6 +13109,57 @@ function catalogOpenPdf(pdf_rel) {
   if (!pdf_rel) return;
   window.open(`/api/raw_pdf?rel=${encodeURIComponent(pdf_rel)}`, '_blank');
 }
+// ── Continuity STATE banner + modal ──────────────────────────────
+let _CONTINUITY = null;
+
+async function loadContinuity() {
+  try {
+    const r = await fetch('/api/continuity');
+    const j = await r.json();
+    _CONTINUITY = j;
+    const badge = document.getElementById('topbar-continuity');
+    const label = document.getElementById('topbar-continuity-label');
+    if (!badge || !label) return;
+    if (j.available) {
+      badge.style.display = '';
+      const short = (j.headline || j.filename || 'continuity').slice(0, 70);
+      label.textContent = short;
+      badge.title = `Last handoff: ${j.filename} · ${j.mtime}`;
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { /* silent */ }
+}
+
+function openContinuityModal() {
+  document.getElementById('continuity-modal').classList.add('show');
+  const body = document.getElementById('continuity-body');
+  const meta = document.getElementById('continuity-meta');
+  const hist = document.getElementById('continuity-history');
+  if (!_CONTINUITY || !_CONTINUITY.available) {
+    body.textContent = 'No continuity state available.';
+    if (meta) meta.textContent = '';
+    if (hist) hist.innerHTML = '';
+    return;
+  }
+  body.textContent = _CONTINUITY.markdown || '';
+  if (meta) meta.textContent = `${_CONTINUITY.filename} · ${(_CONTINUITY.byte_size/1024).toFixed(1)} KB · ${_CONTINUITY.mtime}`;
+  if (hist) {
+    const items = _CONTINUITY.history || [];
+    hist.innerHTML = items.length
+      ? items.map(it => `<div style="padding:2px 0">${escapeHtml(it.filename)} <span style="color:var(--c-text-faint);font-size:11px">${(it.byte_size/1024).toFixed(1)} KB · ${escapeHtml(it.mtime)}</span></div>`).join('')
+      : '<span style="color:var(--c-text-faint)">none</span>';
+  }
+}
+
+function closeContinuityModal() {
+  document.getElementById('continuity-modal').classList.remove('show');
+}
+
+// Auto-load continuity once after boot, then refresh every 60s
+loadContinuity();
+setInterval(loadContinuity, 60000);
+
 // ── Phase 2.1: Export print-ready PDF ────────────────────────────
 let _EXPORT_TIMER = 0;
 function openExportModal() {

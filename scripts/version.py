@@ -39,6 +39,10 @@ TRACKED_QUICK = [
     ROOT / "output" / "Comply spec Smart Plant 1.xlsx",
     ROOT / "SKILL.md",
 ]
+TRACKED_QUICK_DIRS = [
+    ROOT / "knowledge_base",  # KB folder — small, important for agent development
+    ROOT / "_continuity",     # session continuity state files — critical for resume
+]
 EXCLUDE_FROM_FULL = [
     "_archive",
     ".DS_Store",
@@ -89,6 +93,29 @@ def cmd_snap(args, full: bool = False):
             "snapped_as": src.name,
         }
         print(f"  ✓ {rel} ({src.stat().st_size:,} bytes)")
+
+    # Copy tracked dirs (knowledge_base) — small + important
+    for src_dir in TRACKED_QUICK_DIRS:
+        if not src_dir.exists():
+            continue
+        rel = str(src_dir.relative_to(ROOT))
+        dst = snap_dir / src_dir.name
+        shutil.copytree(src_dir, dst, dirs_exist_ok=True)
+        # record file list + sizes
+        files_info = {}
+        for f in src_dir.rglob("*"):
+            if f.is_file() and not f.name.startswith(".") and not f.name.startswith("~$"):
+                f_rel = str(f.relative_to(ROOT))
+                files_info[f_rel] = {
+                    "size": f.stat().st_size,
+                    "sha256": sha256_file(f),
+                }
+        manifest["files"][rel + "/"] = {
+            "kind": "directory",
+            "files": files_info,
+            "total_size": sum(v["size"] for v in files_info.values()),
+        }
+        print(f"  ✓ {rel}/ ({len(files_info)} files, {sum(v['size'] for v in files_info.values()):,} bytes)")
 
     if full:
         # tar.gz the entire output/ folder (excluding _archive, etc.)

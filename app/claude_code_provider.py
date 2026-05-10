@@ -281,15 +281,35 @@ class ClaudeCodeProvider:
             except Exception as e:
                 sys.stderr.write(f"[claude_code_provider] SKILL.md load: {e}\n")
 
-        # KB.md + pitfalls.md
+        # KB.md + pitfalls.md + sr_pattern.md (added 2026-05-10)
         if self.kb_root and self.kb_root.exists():
-            for fname in ("KB.md", "pitfalls.md"):
+            for fname in ("KB.md", "pitfalls.md", "sr_pattern.md", "pipelines.md"):
                 p = self.kb_root / fname
                 if p.exists():
                     try:
                         parts.append(f"## {fname}\n\n" + p.read_text(encoding="utf-8"))
                     except Exception as e:
                         sys.stderr.write(f"[claude_code_provider] {fname}: {e}\n")
+
+        # Continuity state (latest STATE_*.md from _continuity/) — added
+        # 2026-05-10. Carries the most recent session's "last completed task /
+        # open-in-progress / pending user decisions" for the next session.
+        try:
+            cont_root = (self.cwd or Path.cwd()) / "_continuity"
+            if cont_root.exists():
+                states = sorted(cont_root.glob("STATE_*.md"))
+                if states:
+                    latest = states[-1]   # filename includes timestamp
+                    txt = latest.read_text(encoding="utf-8")
+                    parts.append(
+                        f"## Continuity state ({latest.name})\n\n"
+                        f"This is the handoff document from the previous "
+                        f"session — read it before suggesting actions so you "
+                        f"don't ignore in-progress work or pending user "
+                        f"decisions.\n\n" + txt
+                    )
+        except Exception as e:
+            sys.stderr.write(f"[claude_code_provider] continuity load: {e}\n")
 
         # Top learned patterns (compact)
         try:

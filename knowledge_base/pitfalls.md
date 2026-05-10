@@ -24,6 +24,61 @@ doc = fitz.open(OUT_PATH)
 # add fresh annotations
 ```
 
+### 1.1b 🆕 (2026-05-10) `delete_annot` ไม่ persist with stored Annot ref
+
+**Symptom:** Iterate annotations, store refs, call `delete_annot(a)` for each → save → reload → annotations STILL THERE (or DUPLICATED if also re-added).
+
+**Cause:** PyMuPDF's `Annot` references become invalidated after first `delete_annot` call on any sibling. Storing refs and iterating over them after a delete leaves stale handles that silently fail.
+
+**Tried & failed:**
+```python
+# ❌ Stale refs after first delete
+a_list = []
+a = page.first_annot
+while a:
+    a_list.append(a)
+    a = a.next
+for a in a_list:
+    page.delete_annot(a)  # only first works reliably
+
+# ❌ Loop with first_annot — but save still keeps old objects in xref
+while page.first_annot:
+    page.delete_annot(page.first_annot)
+```
+
+**✅ Working fix — clear /Annots dict directly via xref:**
+```python
+for pi in range(doc.page_count):
+    page = doc[pi]  # keep ref alive (see 1.1c)
+    doc.xref_set_key(page.xref, "Annots", "[]")
+# Now /Annots is empty array. Re-add desired annotations:
+for spec in specs_to_keep:
+    page = doc[spec.page_idx]
+    if spec.type == 'FreeText':
+        page.add_freetext_annot(spec.rect, spec.text, ...)
+    # etc.
+doc.save(out, garbage=4, clean=True, deflate=True)
+```
+
+This was the breakthrough that made SR-pattern conversion + dedup work cleanly across 50 PDFs.
+
+### 1.1c 🆕 (2026-05-10) "annotation not bound to any page" — page must stay alive
+
+**Symptom:** `AttributeError: 'NoneType' object has no attribute 'm_internal'` or `code=4: annotation not bound to any page` mid-iteration.
+
+**Cause:** `doc[pi].first_annot` evaluates `doc[pi]` to a `Page` object, then immediately discards the page reference. The annotations rely on the parent page being alive.
+
+```python
+# ❌ Page garbage-collected mid-iter
+a = doc[pi].first_annot
+
+# ✅ Keep page in scope
+page = doc[pi]
+a = page.first_annot
+```
+
+This bug is silent — labels appear "missing" when the iteration just bailed early.
+
 ### 1.2 MuPDF "object out of range" warnings
 
 **Symptom:** Lots of `MuPDF error: format error: object out of range...` in stderr.
@@ -339,3 +394,45 @@ python3 scripts/version.py restore "before-restore"
 **Issue:** Multiple `.bak` files accumulate.
 
 **Fix:** Use timestamp/tag in snapshot tag instead of `.bak`. The `version.py` system handles this — use it instead of manual backups.
+
+### 7.3 🆕 (2026-05-10) GDrive sync timeout on bulk file ops
+
+**Symptom:** `shutil.copy2` times out with `TimeoutError: [Errno 60] Operation timed out` when copying `Comply spec Smart Plant 1.xlsx` for snapshot. `du -h` shows `0B`, `head -c 100` errors.
+
+**Cause:** GDrive cloud-only files (synced metadata-only). Triggering a read forces download — slow over network or stalls if GDrive paused.
+
+**Fix:**
+1. Check sync responsiveness first: `python3 -c "import shutil,time; t0=time.time(); shutil.copy2('<path>','/tmp/test'); print(time.time()-t0)"`
+2. If slow: pause and wait, OR force-sync the specific file via GDrive UI
+3. After sync resumes: re-run snapshot
+
+Workaround for batch copy in scripts: use direct `os.open(O_WRONLY|O_TRUNC) + os.write()` instead of `shutil.copy2` — bypasses fast-copy fallback and works on cloud-cached files.
+
+```python
+with open(src, 'rb') as f: data = f.read()
+fd = os.open(dst, os.O_WRONLY | os.O_TRUNC); os.write(fd, data); os.close(fd)
+```
+
+---
+
+## 8. 🆕 (2026-05-10) Context Management Pitfalls
+
+### 8.1 Don't wait until context fills to make continuity doc
+
+**Symptom:** Context auto-compacts mid-task, you lose track of what was in-progress, redo work or forget user's verbatim corrections.
+
+**Fix:** When context utilization estimate hits ~70%, ALWAYS write `_continuity/STATE_<YYYYMMDD>_<HHMMSS>.md` BEFORE compaction:
+- Last completed task + snapshot ID
+- TodoWrite current state (verbatim)
+- Pending user decisions
+- Recent corrections (verbatim quotes — these get lost in compaction)
+- Next single concrete action
+- Files to read on resume
+
+See SKILL.md กฎข้อ 12 + KB.md "Session Continuity" section for full template.
+
+### 8.2 Don't summary-rephrase user corrections
+
+**Symptom:** Compaction summary drops critical nuance like "ไม่ใช่คือให้ศึกษาสิ่งที่ SR ทำ ไม่ต้องไปแก้ของเค้า" → next session edits SR catalogs anyway.
+
+**Fix:** In continuity doc, copy user's exact correction quote with quote marks. Compaction preserves quoted strings better than paraphrased intent.

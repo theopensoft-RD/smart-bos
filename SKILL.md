@@ -344,14 +344,34 @@ DS: font: bold Helvetica,sans-serif 9.0pt; text-align:left; color:#FF0000
 
 ## กฎพิเศษที่ต้องจำเสมอ
 
-### กฎข้อ 1: "ยินดีปฏิบัติตามข้อกำหนด" — ใช้กับ:
-1. **Software ข้อย่อย** (ที่มีคำว่า "ซอฟต์แวร์ประยุกต์สำเร็จรูป", "Package Application Software", "Software")
-2. **งานติดตั้ง / install** (parent ข้อ + ทุก ข้อย่อย ภายใน)
-3. ข้อกำหนดที่ไม่มีค่าใน datasheet ให้อ้างอิง (commitment statement)
+### กฎข้อ 1: "ยินดีปฏิบัติตามข้อกำหนด" vs "ไม่พบใน catalog" — ใช้แยกชัด
+
+**"ยินดีปฏิบัติตามข้อกำหนด"** ใช้กับเฉพาะ:
+1. **งานติดตั้ง / install** (parent ข้อ + ทุก ข้อย่อย ภายใน) เช่น "เดินสาย", "ติดตั้ง", "ทดสอบระบบ"
+2. **Software/Firmware ที่ทีมเขียนเอง** เช่น SCADA Application, Custom Dashboard, Mobile App ที่ develop เอง
+3. Commitment statements ที่ไม่ใช่ spec hardware (เช่น "รับประกัน 1 ปี", "training")
+
+**"ไม่พบใน catalog"** ใช้กับ:
+- ข้อย่อยที่เป็น **hardware spec** หรือ **product feature** แต่หา callout/page ใน catalog ไม่เจอ
+- ใช้เป็น **flag เตือน user** ให้ตรวจสอบอีกครั้ง — อาจต้อง:
+  - หาหน้า catalog ที่ระบุ spec นั้น แล้วเพิ่ม annotation
+  - เปลี่ยนรุ่นเป็นรุ่นที่ comply ได้
+  - หรือยืนยันว่าเป็น commitment จริงๆ (แล้วเปลี่ยนเป็น "ยินดีปฏิบัติฯ")
+
+**กฎตัดสินใจ:**
+```
+TOR ข้อย่อยพูดถึง...
+├── installation/wiring/setup     → "ยินดีปฏิบัติตามข้อกำหนด"
+├── software/firmware เขียนเอง    → "ยินดีปฏิบัติตามข้อกำหนด"
+├── warranty/training/commitment  → "ยินดีปฏิบัติตามข้อกำหนด"
+└── product spec/feature/standard → ต้องมี catalog ref
+                                    ├── หาเจอ → "เทียบเท่าข้อกำหนด เอกสาร ..."
+                                    └── หาไม่เจอ → "ไม่พบใน catalog" ⚠ FLAG
+```
 
 วิธีใช้:
-- Col D เขียน "ยินดีปฏิบัติตามข้อกำหนด"
-- **ไม่ตี Square หรือ FreeText ใน PDF** สำหรับข้อย่อยประเภทนี้
+- Col D เขียน "ยินดีปฏิบัติตามข้อกำหนด" หรือ "ไม่พบใน catalog" ตามกฎข้างต้น
+- **ไม่ตี Square หรือ FreeText ใน PDF** สำหรับข้อย่อยทั้ง 2 ประเภทนี้
 
 ### กฎข้อ 2: Label positioning ในพื้นที่ขาว
 
@@ -413,6 +433,64 @@ DS: font: bold Helvetica,sans-serif 9.0pt; text-align:left; color:#FF0000
 - **Y = Model number / part number เท่านั้น** (เช่น QO116C06RCBO30, UV-9012H-SUS, JG-LDO-N01)
 - **ห้ามใส่ spec values** ต่อท้าย (เช่น "1P+NS 16A 30mA 6000A") → จะสร้างความสับสนให้คนตรวจ — spec values อยู่ใน Col B/C อยู่แล้ว
 - ถ้าต้องการระบุ variant ใส่เป็นวงเล็บได้ (เช่น `UV-9012H-SUS (Stainless)`)
+
+### 🔑 กฎข้อ 9: Hybrid Annotation Pattern — Highlight ก่อน Rect (NEW 2026-05-10)
+
+**ค้นพบจากศึกษา SR's annotation convention** — pattern ที่เร็วและ print-friendly
+
+> **สำคัญ:** ใช้กับ catalog ที่ **เราทำเอง** — SR's catalog มี annotation ของเค้าอยู่แล้ว **ห้ามแก้**
+
+**กฎ:** เลือก annotation type ตาม PDF type:
+
+| PDF type | Detection | Annotation type | Speed |
+|---|---|---|---|
+| **Text-based** (text_len > 500 chars/page) | `page.get_text()` length | **Highlight สีเหลือง + callout `N)`** | < 1 วิ/spec |
+| **Image-based** (text_len < 100 chars/page) | scanned PDF, image-only | **Rect + callout `N)`** | 5-30 วิ/spec |
+| **Mixed** (100-500 chars/page) | partial text layer | ลอง highlight ก่อน → fallback rect | varies |
+
+**SR's callout convention (study reference, see `knowledge_base/sr_pattern.md`):**
+- Format: `N)` — สั้น แค่เลข ข้อย่อย + closing paren
+- Section number **ไม่ใส่** — implicit จาก folder structure (ไฟล์อยู่ใน folder section นั้น)
+- White background (พิมพ์เห็นชัด)
+- Position: ใน white space ใกล้ highlight (right margin / table empty area)
+
+**Sample code (Text-based highlight + callout `N)`):**
+
+```python
+def hl_callout(page, search_text, sub_n, page_w):
+    """Highlight text + add SHORT callout 'N)' at right margin (SR-style)."""
+    rects = page.search_for(search_text)
+    if not rects: return False
+    for r in rects:
+        h = page.add_highlight_annot(r)
+        h.set_colors(stroke=(1, 1, 0))  # yellow
+        h.update()
+    first = rects[0]
+    # SR convention: short callout 'N)' with white bg
+    lbl_rect = fitz.Rect(page_w - 25, first.y0, page_w - 5, first.y0 + 12)
+    ft = page.add_freetext_annot(lbl_rect, f"{sub_n})", fontsize=9, fontname="hebo",
+                                  text_color=(1, 0, 0),
+                                  fill_color=(1, 1, 1),  # WHITE BG (print-clear)
+                                  align=fitz.TEXT_ALIGN_CENTER)
+    ft.set_border(width=0); ft.update()
+    return True
+
+# Usage example (H3C R4900 G7 if WE do annotation):
+# hl_callout(p3, "Intel® Xeon® 6 Processors", 1, 596)
+# hl_callout(p3, "DDR5 RDIMM Slots", 3, 596)
+```
+
+**Brand + Model บน cover** — ใช้ rect (cover มัก image-based + logo เป็นรูป) + label `ยี่ห้อ` / `รุ่น`
+
+**ข้อดี vs rect-only approach:**
+1. **เร็วกว่า 10-30x** — ไม่ต้องหา coords manually
+2. **ชัดกว่า** — highlight ทับข้อความตรงๆ
+3. **Print-friendly** — short callout `N)` พื้นหลังขาว เห็นชัดเวลาพิมพ์
+4. **ไม่บดบังเนื้อหา** — callout อยู่ margin
+
+**Cross-ref กับ xlsx Col D:** ตอนนี้ Col D ใช้ format `เทียบเท่าข้อกำหนด เอกสาร {section} {name} หน้า {P} ข้อ {section} ข้อย่อย {N}.` — verify โดยเปิด PDF + ดู callout `N)` ที่ตรงกับ ข้อย่อย N
+
+---
 
 ### 🔑 กฎข้อ 8: Single-row Comply Item — Extract spec จาก main item
 
@@ -514,8 +592,9 @@ DS: font: bold Helvetica,sans-serif 9.0pt; text-align:left; color:#FF0000
 9. **อัพเดต Col C** — ตัดคำเปรียบเทียบจาก B + ใช้ค่าจริงจาก catalog
 10. **อัพเดต Col D**:
     - parent ข้อ ที่มีรุ่น → `ยี่ห้อ {brand} รุ่น {model}` (หรือ `ยี่ห้อ - รุ่น {model}` ถ้าไม่มี brand)
-    - ข้อย่อย → `เทียบเท่าข้อกำหนด เอกสาร {section}-{N} ... หน้า {P} ข้อ {section} ข้อ X) ข้อย่อย N.`
-    - software/install → `ยินดีปฏิบัติตามข้อกำหนด`
+    - ข้อย่อย hardware spec ที่หา catalog เจอ → `เทียบเท่าข้อกำหนด เอกสาร {section}-{N} ... หน้า {P} ข้อ {section} ข้อ X) ข้อย่อย N.`
+    - งานติดตั้ง / software-เขียนเอง / commitment → `ยินดีปฏิบัติตามข้อกำหนด`
+    - hardware spec ที่หา catalog ไม่เจอ → `ไม่พบใน catalog` ⚠ (flag ให้ user ตรวจ)
     - section header → ปล่อยว่าง
 11. **verify** เนื้อหาใต้ rect ตรงกับ Col C — ถ้าไม่ตรง ถาม user ก่อนแก้
 12. **ขอ confirm brand/model values** กับ user ก่อนเขียน Col D
@@ -524,7 +603,7 @@ DS: font: bold Helvetica,sans-serif 9.0pt; text-align:left; color:#FF0000
 
 ## Verification Checklist (ตอนเสร็จ section)
 
-- [ ] Col D ทุกแถวตรง 1 ใน 6 รูปแบบที่ระบุ (เทียบเท่า / สูงกว่า / brand-model / dash-brand / commitment / empty) หรือ filename-format (single-row) / model-only (nested ข้อย่อย)
+- [ ] Col D ทุกแถวตรง 1 ใน 7 รูปแบบที่ระบุ (เทียบเท่า / สูงกว่า / brand-model / dash-brand / commitment "ยินดีปฏิบัติฯ" / flag "ไม่พบใน catalog" / empty) หรือ filename-format (single-row) / model-only (nested ข้อย่อย)
 - [ ] Catalog references ใน Col D resolve ไป rect+label จริงใน PDF
 - [ ] Brand rect → label = `ยี่ห้อ`, Model rect → label = `รุ่น`
 - [ ] Sub-phrase rects → label `{section} ข้อ X) ข้อย่อย N.` หรือ `{section} ข้อย่อย N.`
@@ -884,3 +963,147 @@ for pi in needs_header:
 **101 PDFs annotated** ใน output/, ครอบคลุมทุก section (5.1.1 - 5.1.8, 5.2.1 - 5.2.6)
 
 **ดูรายละเอียด status + cross-reference:** `knowledge_base/sections.json` + `knowledge_base/KB.md`
+
+---
+
+## อัพเดต 2026-05-10 — TRIO_SR_Solution + SR Pattern Adoption
+
+### บริบทใหม่: 2 Consortium proposals
+หลัง user แจ้ง Trio Sr Solution + Take IT เป็น 2 consortia แยกข้อเสนอ:
+- `output/TRIO_SR_Solution/` (ใช้ catalog จาก SR เป็นหลัก)
+- `output/Take_IT/` (ใช้ catalog ที่เราทำเองทั้งหมด)
+- `output/Comply spec Smart Plant 1.xlsx` master = 660 rows
+- xlsx ของแต่ละ consortium มี sheet tab ของตัวเอง
+
+### SR Pattern (กฎข้อ 9) — ใช้กับ catalog ที่เราทำเอง
+**Hybrid annotation:** highlight (text-based PDF) + rect (image-based PDF) + **short callout `N)` พื้นหลังขาว**
+- text density >500 chars/page → use `page.search_for(keyword)` + `add_highlight_annot` + callout right margin
+- text density <100 chars/page → use rect + callout
+- **callout format ใหม่:** `N)` หรือ `N.M)` (ไม่มี section prefix แล้ว) — สั้น พื้นหลังขาว ตัวอักษรแดง 9pt
+- **Section prefix implicit จาก folder location** (ไม่ต้องเขียน `5.1.1.2 ข้อย่อย 1.` แบบเดิม)
+- **Print clarity:** white fill + red text + no border = ชัดเจนเวลาพิมพ์
+
+```python
+ft = page.add_freetext_annot(small_rect, f"{n})", fontsize=9, fontname="hebo",
+    text_color=(1, 0, 0), fill_color=(1, 1, 1),
+    align=fitz.TEXT_ALIGN_CENTER)
+ft.set_border(width=0)
+ft.update()
+```
+
+### กฎข้อ 10: ห้ามแก้ catalog ของ SR
+**Rule:** SR catalogs ใน `catalog/SR/extracted/` = read-only reference เท่านั้น
+- **อ่าน** เพื่อศึกษา pattern (highlight + callout placement)
+- **Copy** ไปที่ `output/TRIO_SR_Solution/` ตามต้นฉบับ
+- **เพิ่ม header เท่านั้น** บนสุด ไม่ทับ annotations ของ SR
+- **ห้าม** ลบ/แก้ highlights/rects/callouts ของ SR
+
+### กฎข้อ 11 (NEW): "ไม่พบใน catalog" vs "ยินดีปฏิบัติฯ"
+**ใช้ "ยินดีปฏิบัติตามข้อกำหนด"** เฉพาะ:
+1. งานติดตั้ง / install (เดินสาย, ติดตั้ง, ตั้งค่า)
+2. Software/Firmware ที่ทีมเขียนเอง (SCADA, dashboard, custom app)
+3. Commitment statements (warranty, training, document delivery)
+
+**ใช้ "ไม่พบใน catalog"** เมื่อ:
+- ข้อย่อยเป็น hardware spec / product feature
+- หา callout/page ใน catalog ไม่เจอ → flag ให้ user ตรวจ
+
+User ทำต่อได้ 3 ทาง:
+1. หา catalog page → annotate + เปลี่ยนเป็น "เทียบเท่าฯ"
+2. เปลี่ยนรุ่นเป็นรุ่นที่ comply ได้
+3. ยืนยันเป็น commitment จริง → revert "ยินดีปฏิบัติฯ"
+
+### กฎข้อ 12 (CRITICAL): Continuity Document — เมื่อ context ใกล้เต็ม
+
+**กฎ:** ถ้า context window ใกล้เต็ม (estimate >70% of max), **เสมอ** ทำ continuity document ก่อน auto-compaction
+
+**ทำที่ไหน:** สร้างหรืออัพเดต `_continuity/STATE_<YYYYMMDD>.md` ครอบคลุม:
+
+```markdown
+# Continuity State — <date>
+
+## Last completed task
+- [task name + result]
+- Files modified: [list with line counts]
+- Snapshot ID: 2026-MM-DD_HHMMSS_...
+
+## Open in-progress
+- TodoWrite todos (copy-paste)
+- Pending decisions waiting for user
+
+## Critical context for next session
+- Recent user corrections/preferences (verbatim quotes)
+- Discovered bugs/workarounds (e.g., PyMuPDF xref_set_key trick)
+- Path conventions in use
+- Vendor sections currently being worked on
+
+## Next planned action
+- Single concrete next step (e.g., "Run /tmp/foo.py on 5 remaining files")
+- Why this is the right next step
+
+## Files to read first on resume
+1. SKILL.md (always)
+2. knowledge_base/KB.md (always)
+3. _continuity/STATE_<YYYYMMDD>.md (this file)
+4. <other context-specific files>
+```
+
+**Trigger ตอนทำ:**
+- ก่อน auto-compact (sync hint)
+- Long-running batch task ที่อาจใช้ context >5 turns
+- User กล่าวว่า "หยุด" / "พอแค่นี้ก่อน" / "บันทึกสถานะ"
+- หลัง snapshot สำเร็จที่เป็น milestone ใหญ่
+
+**Don't:**
+- ห้ามรอจน context overflow แล้วค่อยทำ
+- ห้ามเขียนยาวเกิน — ต้องอ่านได้เร็วใน 30 วินาที
+- ห้ามใส่ raw output ของ commands (ใส่แค่ summary)
+
+### Bug fix ใหม่ที่ค้นพบ (PyMuPDF)
+
+**1. delete_annot ไม่ persist กับ stored Annot ref**
+```python
+# ❌ ไม่ทำงาน — ลบไม่หาย หลัง save
+a_list = []
+a = page.first_annot
+while a: a_list.append(a); a = a.next
+for a in a_list: page.delete_annot(a)
+
+# ✅ ทำงาน — clear /Annots array โดยตรง
+for pi in range(doc.page_count):
+    doc.xref_set_key(doc[pi].xref, "Annots", "[]")
+# จากนั้น re-add annotations ที่ต้องการ
+```
+
+**2. "annotation not bound to any page" — ต้อง keep page ref alive**
+```python
+# ❌ page ถูก garbage-collect ระหว่าง iter annotations
+a = doc[pi].first_annot
+
+# ✅ keep page ref
+page = doc[pi]
+a = page.first_annot
+```
+
+### TRIO_SR_Solution Final State (2026-05-10)
+
+```
+PDFs (104 ทั้งหมด):
+├── 75 SR pattern (highlight/rect + short callout N))
+├── 27 brand-marker only (ยี่ห้อ/รุ่น single-row)
+├── 2 placeholder (BOD/DO Sensor SR proposal 1-page summary)
+└── 0 empty / 0 duplicate / 0 long label
+
+xlsx Col D distribution (660 rows):
+├── 309 (46.8%) เทียบเท่าข้อกำหนด ✅
+├── 115 (17.4%) ไม่พบใน catalog ⚠ (flag for user)
+├── 77 (11.7%) ยินดีปฏิบัติฯ (real install/software)
+├── 58 (8.8%) ยี่ห้อ-รุ่น
+├── 45 (6.8%) filename ref (single-row)
+├── 30 (4.5%) สูงกว่าข้อกำหนด
+└── 23 (3.5%) section header (empty)
+
+Cross-ref check: 339/340 verified (100% data rows)
+```
+
+**Snapshot:** `2026-05-10_111357_Add--ไม-พบใน-catalog--rule...`

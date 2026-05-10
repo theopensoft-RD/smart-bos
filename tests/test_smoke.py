@@ -184,6 +184,21 @@ def test_export_preview_and_build_small(client, gui):
     assert any(it["filename"] == j["filename"] for it in items)
 
 
+def test_continuity_endpoint(client, gui):
+    """/api/continuity returns the latest STATE markdown if present."""
+    r = client.get("/api/continuity")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j.get("ok") is True
+    # When there's a _continuity/STATE_*.md in the project root, the
+    # endpoint must report it. Smart Plant 1 has one as of 2026-05-10.
+    if j.get("available"):
+        assert j["filename"].startswith("STATE_")
+        assert j["filename"].endswith(".md")
+        assert j["byte_size"] > 0
+        assert "markdown" in j and len(j["markdown"]) > 0
+
+
 def test_claude_stream_endpoint_responds_or_503(client, gui):
     """Phase 1 SSE endpoint: must either stream events (200, text/event-stream)
     or return 503 with a hint when the provider can't be initialized.

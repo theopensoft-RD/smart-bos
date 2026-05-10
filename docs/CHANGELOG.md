@@ -1102,3 +1102,81 @@ Full 309-catalog package would be roughly 2-3 s on this machine.
 - **PyMuPDF doesn't support multi-page text wrapping in one call**;
   manually paginate when content might exceed one page (audit log,
   long TOC).
+
+---
+
+## Phase 2.2 — Knowledge integration (SKILL/KB/pitfalls/sr_pattern + continuity)
+
+**Trigger**: the user's parallel project agent (working in
+`/GDrive/Pattaya Project/Smart Plant 1/co-work/claude-code/`) shipped
+a major knowledge update plus a new "continuity" handoff document.
+The GUI now reads them too.
+
+**Synced files** (from project folder, no content drift):
+- `SKILL.md` — bumped from 63 KB → 75 KB. Major addition: Rule 1
+  refined to distinguish `"ยินดีปฏิบัติตามข้อกำหนด"` (commitment for
+  installation/software-internal) vs `"ไม่พบใน catalog"` (flag for
+  hardware specs not yet found in catalog → user must review).
+  Added Rule 12: continuity document convention.
+- `knowledge_base/KB.md` — extended (110 line additions)
+- `knowledge_base/pitfalls.md` — +97 lines (PyMuPDF gotchas
+  including `delete_annot` not persisting and GDrive sync failure
+  on `shutil.copy2`)
+- `knowledge_base/sr_pattern.md` — **NEW** (~8 KB). Read-only study
+  of how SR (Smart Solution Co.) annotates their proposed catalogs:
+  highlight + short callouts `N)` (no section prefix), white bg,
+  red text, no border. Used as reference when annotating sister
+  catalogs in the same SR style.
+- `knowledge_base/pipelines.md` — extended
+- `_continuity/STATE_20260510_111800.md` — **NEW** (~5.6 KB).
+  Handoff document: last completed task, open in-progress, pending
+  user decisions (verbatim quotes), discovered bugs, vendor
+  sections currently being worked on, next planned action.
+
+**Provider integration** (`app/claude_code_provider.py`):
+- System prompt now loads (in order): SKILL.md → KB.md → pitfalls.md
+  → **sr_pattern.md** → pipelines.md (added)
+- Plus the **latest STATE_*.md** from `_continuity/` (preceded by a
+  paragraph telling Claude what it is and to read it before
+  suggesting actions). This means every agent run starts with full
+  awareness of pending user decisions and in-progress work.
+- 60-second cache still applies — picks up edits to those files
+  within a minute without restart.
+
+**New endpoint `GET /api/continuity`**:
+- Returns the latest STATE markdown, headline (first non-heading
+  line), filename, mtime, byte_size, plus a list of previous
+  handoffs.
+- 200 OK with `available: false` when none present.
+
+**New UI: continuity badge in topbar**
+- Small warn-colored pill, only visible when a STATE file exists
+- Shows the headline (truncated to 70 chars)
+- Click → modal with full markdown rendered as monospace,
+  collapsible "Previous handoffs" list
+- Auto-refreshes every 60 s so a new STATE drop appears
+  automatically without restart
+
+**Verification**:
+- 9/9 smoke tests pass (was 8; +1 `test_continuity_endpoint`)
+- ruff: All checks passed
+- Visual: opening the GUI now shows the warn pill at the top
+  carrying "Adopted SR pattern across TRIO_SR_Solution + applied
+  'ไม่พบใน catalog' flag rule"
+
+**Why this matters**: previously the Skill Agent and the GUI session
+were two separate brains with no shared context. Now the GUI's
+Claude Code provider reads the Skill Agent's STATE document before
+proposing anything, and the operator sees the same handoff at a
+glance — single source of truth for "what's the project up to right
+now?"
+
+**Lessons captured**:
+- **Continuity files are cheap, high-value**: a 5 KB markdown
+  written by the previous session saves the new session 5+ minutes
+  of "re-orienting" via grep + audit_log scans.
+- **Don't gitignore `_continuity/`** — it's a *deliverable* of every
+  session, not a transient. Commit it so reverts are clean.
+- **System prompt cache TTL = 60s** is the right granularity for
+  these files. Short enough that edits propagate, long enough that
+  a flurry of API calls doesn't re-read the disk every time.

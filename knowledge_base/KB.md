@@ -34,30 +34,64 @@
 - **E** = Vendor (SMART/TRIO/SR)
 - **F** = Status (รอ user ตรวจสอบ / รอ catalog)
 
-### Col D Patterns (6 + 2 sub-patterns)
+### Col D Patterns (7 + 2 sub-patterns)
 1. **เทียบเท่าข้อกำหนด** — catalog spec matches TOR
 2. **สูงกว่าข้อกำหนด** — catalog spec exceeds TOR ✨ (added 2026-05-09)
 3. **ยี่ห้อ X รุ่น Y** — parent row with explicit brand+model
 4. **ยี่ห้อ - รุ่น Y** — fabricate item (no brand, e.g., Vibration sensor)
-5. **ยินดีปฏิบัติตามข้อกำหนด** — Software, install work, generic capability
-6. **(empty)** — section header rows
-7. *(extra)* **filename-format** — single-row item: `{section} {Col B desc minus จำนวน} {model}`
-8. *(extra)* **model-only** — nested ข้อย่อย under multi-row install parent (e.g., `US-9106LSZH`)
+5. **ยินดีปฏิบัติตามข้อกำหนด** — install work / written-by-us software / commitment ONLY
+6. **ไม่พบใน catalog** ⚠ — hardware spec not found in catalog (flag for user review) ✨ (added 2026-05-10)
+7. **(empty)** — section header rows
+8. *(extra)* **filename-format** — single-row item: `{section} {Col B desc minus จำนวน} {model}`
+9. *(extra)* **model-only** — nested ข้อย่อย under multi-row install parent (e.g., `US-9106LSZH`)
+
+### Decision tree for picking Col D
+```
+ข้อย่อย พูดถึง...
+├── installation/wiring/setup     → ยินดีปฏิบัติฯ
+├── self-written software/firmware → ยินดีปฏิบัติฯ
+├── commitment (warranty/training/manual) → ยินดีปฏิบัติฯ
+└── product spec/hardware feature
+    ├── พบใน catalog (พร้อม annotation) → เทียบเท่าฯ / สูงกว่าฯ
+    └── ไม่พบใน catalog → "ไม่พบใน catalog" ⚠ FLAG
+```
 
 ---
 
-## 📊 Project Status (2026-05-09)
+## 📊 Project Status (2026-05-10) — Latest
 
+### Two Consortia Outputs
 ```
-Total comply rows:       660
-Status รอ user ตรวจสอบ:  637 (97%) ✅
-Section header rows:      23 (3%)
-Status รอ catalog:         0 ✅
+output/Comply spec Smart Plant 1.xlsx      (master, both vendors)
+output/TRIO_SR_Solution/                   (SR catalogs + SR pattern)
+└── Comply spec Smart Plant 1 - TRIO_SR_Solution.xlsx (660 rows)
+output/Take_IT/                            (our own catalogs, original long labels)
 ```
 
-### Annotated PDFs in output/
-- **101 catalog PDFs** annotated with header + brand/model + spec rects
+### TRIO_SR_Solution status
+```
+PDFs:                104 total
+├── 75 SR pattern   (highlight/rect + short callout `N)`, white bg, red text)
+├── 27 brand-marker (single-row pattern)
+├── 2 placeholder   (BOD/DO Sensor SR 1-page proposals)
+└── 0 empty / 0 duplicate / 0 long label
+
+xlsx Col D distribution (660 rows):
+├── 309 (46.8%) เทียบเท่าข้อกำหนด ✅
+├── 115 (17.4%) ไม่พบใน catalog ⚠ (flagged for user review)
+├── 77 (11.7%) ยินดีปฏิบัติฯ (verified install/software/commitment)
+├── 58 (8.8%) ยี่ห้อ-รุ่น
+├── 45 (6.8%) filename ref (single-row)
+├── 30 (4.5%) สูงกว่าข้อกำหนด
+└── 23 (3.5%) section header (empty)
+
+Cross-ref check: 339/340 verified (100% of data rows)
+```
+
+### Take_IT status (unchanged from 2026-05-09)
+- **101 catalog PDFs** annotated with header + brand/model + long-format spec rects
 - Spread across **5.1.1 — 5.1.8 + 5.2.1 — 5.2.6** (all sections)
+- Pre-conversion long-label format (`5.1.1.2 ข้อย่อย 1.`) preserved as Take_IT consortium reference
 
 ---
 
@@ -183,6 +217,58 @@ For sister sections that share a catalog → use multi-model pipeline (40-50% co
 
 - **`SKILL.md`** (root) — workflow rules + conventions (read first)
 - **`output/Comply spec Smart Plant 1.xlsx`** — main work file
+- **`output/TRIO_SR_Solution/`** — SR consortium proposal (SR pattern annotations)
+- **`output/Take_IT/`** — Take IT consortium proposal (long-format annotations)
 - **`TOR/`** — source Terms of Reference
 - **`BOQ/`** — Bill of Quantities (verify quantities match)
 - **`_versions/snapshots/`** — backup history
+- **`_continuity/`** — session continuity documents (state before context wraps) ✨
+
+---
+
+## 🔄 Session Continuity (กฎข้อ 12 ใน SKILL.md)
+
+**เมื่อ context window ใกล้เต็ม (>70% utilization) — สร้าง continuity document ก่อน auto-compact**
+
+### Where: `_continuity/STATE_<YYYYMMDD>_<HHMMSS>.md`
+
+### Required content (must read in <30 sec):
+```markdown
+# Continuity State — <ISO datetime>
+
+## Last completed task
+- <one-line summary>
+- Files modified: <count>
+- Snapshot ID: <snapshot tag>
+
+## Open in-progress
+- <copy todo list verbatim>
+- Pending user decisions: <list>
+
+## Critical recent context
+- User correction (verbatim quote): "<...>"
+- Discovered bugs/workarounds: <key code snippets>
+- Path conventions in current use: <list>
+
+## Next planned action
+- Single concrete step
+- Why it's the right next step
+
+## Files to read on resume
+1. SKILL.md
+2. knowledge_base/KB.md
+3. _continuity/STATE_<this file>.md
+4. <other context-specific>
+```
+
+### When to write
+- ✅ Before milestone snapshots (after major batch finishes)
+- ✅ When user says "บันทึกสถานะ" / "พอแค่นี้" / "หยุด"
+- ✅ When estimating context >70% used
+- ❌ NOT after every small action (would clutter)
+
+### How to read on resume
+First message of new session: Read SKILL.md → KB.md → latest `_continuity/STATE_*.md`
+
+### Latest continuity doc
+See `_continuity/` for current state file (most recent timestamp).
