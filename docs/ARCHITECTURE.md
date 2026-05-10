@@ -666,6 +666,71 @@ Workflow (already established, document it for future agents):
 Don't try to make `.git/` work on Google Drive. macOS's iCloud
 Files-On-Demand can't satisfy git's tight latency requirements.
 
+### 12.10b Verdict in status bar (Phase A6)
+
+The action bar lost its 4-button verdict segmented control. Verdict
+is **state**, so it now lives in the status bar as `.sb-verdict`
+pills. The action bar is now strictly *content actions* (Auto / Mark
+/ auto-next / notes).
+
+```
+┌─ status bar ─────────────────────────────────────────────────────┐
+│ R65 · 5.1.2 · summary │ [✓ผ่าน1][✗ไม่ผ่าน2][⚠แก้3][⏭ข้าม4][↺] │ progress │ Claude $ │ saved │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+`statusBarUpdate()` is the single source of truth — it sets
+`aria-checked` on the matching pill and toggles
+`body[data-row-selected="0|1"]` to grey out the pills when no row
+is selected. The legacy `setStatus`/`renderActionBar` queries
+against `.ab-btn.pass` are no-ops (guarded by `if (btn)`) and kept
+in place so the existing wrapper chain stays intact.
+
+### 12.10c FAB / kbd-help cleanup (Phase A7)
+
+The activity rail covers Search / Theme / Settings / Help in normal
+use. The FAB cluster (bottom-left) and kbd-help strip (bottom-right)
+are now CSS-gated:
+
+- `.floating-actions { display: none }` by default;
+  `body[data-embedded="1"] .floating-actions { display: flex }` for
+  iframe / Claude Preview where the topbar might be covered.
+- `.kbd-help` collapses to a 38 px ⌨ badge that expands on hover
+  to ~600 px. Hidden entirely in embedded mode.
+
+CSS-only — the DOM stays in place so accessibility/screen-reader
+exposure of those affordances is unchanged.
+
+### 12.10d Col D autocomplete (Phase B3)
+
+`GET /api/row/col_d/suggest?row=N&q=text` returns ≤6 ranked
+suggestions when the user inline-edits a Col D cell:
+
+| Kind | Source | Weight |
+|---|---|---|
+| `ai` | `auto_annotate_plan(row).proposed_d` (rules + patterns, no LLM) | 100 |
+| `neighbor` | Col D from same-section-root rows where verdict ∈ {pass, need_fix} | 50 |
+| `shape` | canonical templates (`เอกสาร {section} ... หน้า ?`, commitment) | 10 |
+
+Frontend (`_colDAcOpen` etc.) mounts a single dropdown on `<body>`
+so it escapes any clipping context (same lesson as Phase 13 topbar
+menu). Debounced 250 ms input; Tab/Enter accepts, ArrowUp/Down
+navigates. The panel closes when the editor blurs (with a 120 ms
+delay so a click on a suggestion is processed first).
+
+### 12.10e Patterns-triggered subsection (Phase B5)
+
+`aiPaneRender()` reads `plan.provenance` (already shaped by
+`apply_learned_brand` / `apply_learned_vendor` etc. into
+`{kind: "learned", pattern_type, trigger, confidence, samples}`)
+and renders an `.ai-patterns` subsection inside the Proposal section
+listing which patterns fired and at what confidence. Pure-rules
+proposals (no learned hits) skip the subsection entirely.
+
+This is observability — it makes the AI's reasoning auditable so
+users can debug a misfire by seeing which pattern caused it, then
+disable that pattern from the rail's Learn panel.
+
 ### 12.11 Floating annotation toolbar (Phase A5)
 
 Phase A5 adds a small toolbar that floats above the currently selected

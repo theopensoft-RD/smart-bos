@@ -547,3 +547,131 @@ CSS and the `set_colors` / `set_border` calls in
 `apply_pdf_edits`, plus a spec for which colors are even allowed
 (red is currently load-bearing for `_assert_standard_appearance`
 on legacy annots).
+
+---
+
+## Phase A6 — Verdict moved from action bar to status bar
+
+**Goal**: Reclaim the action bar for *content* actions (Auto / Mark
+/ notes) and surface the binary "did this row pass?" decision in the
+persistent status bar where you'd expect to find it in any IDE-style
+tool.
+
+**Built**:
+- Status bar bumped from 30 px to 38 px to fit pill-shaped verdict
+  buttons.
+- New `.sb-verdict` segmented control with 4 verdict pills
+  (`pass / fail / need_fix / skip`) plus a tiny reset (`↺`) button.
+  Each pill carries a `kbd` tag so users see the 1–4 shortcut without
+  needing the kbd-help.
+- `statusBarUpdate()` now drives `aria-checked` on the active pill,
+  matching the row's current verdict from `DATA.status`.
+- Pills auto-disable (greyed out) when no row is selected via
+  `body[data-row-selected="0"]`.
+- Action bar now contains only Auto / Mark / auto-next / notes —
+  the "verdict-control" segmented group and reset-btn were dropped.
+- Old `setStatus`/`renderActionBar` queries against `.ab-btn.pass`
+  etc. are now no-ops (guarded by `if (btn)`); kept harmless rather
+  than ripped out so the wrapper chain stays intact.
+
+**Why split**: One Acrobat-style pattern is "ribbon = tools, status
+bar = state". Verdict is *state* (this row's outcome) — putting it
+in the status bar lets the user verify and move on without their
+eyes returning to a different bar each time.
+
+---
+
+## Phase A7 — Cleanup duplicate UI surfaces
+
+**Goal**: Remove visual noise from features that already exist
+elsewhere. The activity rail (Phase A1) already surfaces Settings /
+Help / Search / Theme; carrying duplicate FABs and a busy
+keyboard-help strip was just clutter for the 99% case.
+
+**Built**:
+- `.floating-actions` (FAB cluster, bottom-left) now hidden by
+  default — only shown when `body[data-embedded="1"]` so users in
+  Claude Preview MCP / iframes still get a Settings escape hatch
+  even if the topbar is covered by host UI.
+- `.kbd-help` (bottom-right shortcuts strip) collapses to a single
+  ⌨ badge in non-embedded mode, expanding on hover to reveal the
+  full shortcut list. Hidden entirely in embedded mode (where the
+  user can press `?` for the help modal).
+- No HTML/JS removal — everything is CSS-only so the embedded-mode
+  fallback continues to work without re-wiring.
+
+**Why a CSS-only fix**: keeps the FAB DOM in place so accessibility
+tools still see the Settings/Help affordances, and lets users flip
+into embedded mode and back without losing the safety net.
+
+---
+
+## Phase B3 — Live AI Col D autocomplete
+
+**Goal**: When the user double-clicks a Col D cell to inline-edit,
+surface the AI proposal + similar Col D values from neighbor rows
+right under the cell — Tab/Enter to accept, type to filter.
+
+**Built**:
+- New endpoint `GET /api/row/col_d/suggest?row=N&q=text` returns
+  up to 6 ranked suggestions:
+  - **AI proposal** (top-priority): from `auto_annotate_plan(row)` —
+    rule + learned pattern, no LLM call (cheap path).
+  - **Neighbor templates**: Col D values from rows in the same
+    section root (`5.1.*` for a 5.1.2 row) that are already
+    `pass` or `need_fix` verified.
+  - **Shape templates**: canonical fallbacks (`เอกสาร {section}
+    ... หน้า ?`, `ยินดีปฏิบัติตามข้อกำหนด`).
+  - When `q` is non-empty, suggestions whose text contains q (or
+    starts with q) get a score boost; AI proposal still wins ties.
+- Frontend `_colDAcOpen()` mounts a single dropdown panel on
+  `<body>` (escapes any clipping context, same lesson as Phase 13
+  topbar menu / A5 floating toolbar). It fetches via debounced 250 ms
+  input, renders rows with kind badge (AI / Neighbor / Shape),
+  text, source label, confidence %.
+- Keyboard: ArrowUp/Down to navigate, Tab or Enter to accept the
+  highlighted suggestion (puts caret at end), Esc dismisses panel
+  but keeps editing. Mouse click also accepts.
+- Accept fires a synthetic `input` event so the next debounce
+  recomputes — useful when the user picks a shape template and
+  wants to fill in the `?` page number.
+
+**Why this design**: keeps the existing inline `editColD` flow
+intact — autocomplete is an *augmentation*, not a replacement.
+Server cost is ~one `auto_annotate_plan` per panel-open (cheap;
+no LLM unless rules + patterns yield low confidence and Claude is
+installed) plus a single SQL scan over `verification_status` keyed
+by section.
+
+**Verification**: `python ast.parse` + `node --check` on extracted
+script block both pass. Manual test deferred until next live
+session — open a Col D cell, confirm panel appears below and
+shows the AI proposal as the top entry.
+
+---
+
+## Phase B5 — Patterns triggered visualization in AI pane
+
+**Goal**: When Claude (or rule-based pipeline) proposes a Col D
+value, show the user **which** learned patterns fired and how
+confident the system is in each one. This makes the proposal
+auditable instead of a black box.
+
+**Built**:
+- `aiPaneRender()` now reads `plan.provenance` (already populated
+  by `auto_annotate_plan` whenever `apply_learned_brand` /
+  `apply_learned_vendor` / similar return a hit) and builds an
+  `.ai-patterns` subsection inside the Proposal section.
+- Each row shows: pattern_type · trigger · confidence% · samples.
+  E.g. `filename_brand · ruijie · 95% · 12 samples`.
+- The subsection only renders if at least one pattern fired —
+  pure-rules proposals stay clean.
+- Visual style is tight (mono font for pattern_type / trigger,
+  pill for confidence, faint samples count) so it sits under the
+  rationale without competing.
+
+**Why surface this**: aligns with the HITL contract — the user
+should be able to see *why* the AI is proposing X and override it
+with full context. Also doubles as a debug tool: if a wrong pattern
+keeps firing, the user can spot it here and disable the rule from
+the rail's Learn panel.

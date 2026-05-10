@@ -2447,6 +2447,104 @@ def api_row_col_d():
     return jsonify({"ok": True, "row": row_num, "new_d": new_d})
 
 
+@app.route("/api/row/col_d/suggest")
+def api_row_col_d_suggest():
+    """Phase B3: live autocomplete for the Col D inline editor.
+
+    Returns up to 6 ranked candidates: the AI's auto-annotate proposal
+    (top-priority), Col D shapes from same-section verified rows, and
+    a couple of generic shape templates so users can tab-complete.
+
+    Cheap path — no LLM call here. The expensive proposal comes from
+    auto_annotate_plan() which is already cache-friendly via section
+    + filename derivations.
+    """
+    try:
+        row_num = int(request.args.get("row", "0"))
+    except ValueError:
+        return jsonify({"ok": False, "error": "row required"}), 400
+    q = (request.args.get("q") or "").strip()
+    row = next((r for r in ROWS if r["row"] == row_num), None)
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    suggestions: list[dict] = []
+    section = row.get("section_inferred") or ""
+
+    # 1. AI proposal from auto_annotate_plan (rule+pattern, no LLM)
+    try:
+        plan = auto_annotate_plan(row_num)
+        if plan.get("ok") and plan.get("proposed_d"):
+            suggestions.append({
+                "text": plan["proposed_d"],
+                "kind": "ai",
+                "label": "AI proposal",
+                "confidence": round(float(plan.get("confidence") or 0.0), 2),
+                "generator": plan.get("generator", "rules"),
+            })
+    except Exception:
+        pass
+
+    # 2. Col D values from verified rows in the same section root
+    #    (e.g. for section 5.1.2, suggest Col D values from any verified
+    #    5.1.* row). This gives users a "match the neighbor's style"
+    #    completion. De-dupe on text.
+    seen = {s["text"].strip() for s in suggestions}
+    if section:
+        section_root = ".".join(section.split(".")[:2])  # "5.1.2" → "5.1"
+        try:
+            statuses = db.get_all_status()
+        except Exception:
+            statuses = {}
+        for r in ROWS:
+            if r["row"] == row_num: continue
+            sec = r.get("section_inferred") or ""
+            if not sec.startswith(section_root): continue
+            d = (r.get("D") or "").strip()
+            if not d or d in seen: continue
+            # Prefer rows with a non-unverified verdict
+            st = (statuses.get(str(r["row"]), {}) or {}).get("status", "unverified")
+            if st in ("pass", "need_fix"):  # known good/edited shapes
+                suggestions.append({
+                    "text": d, "kind": "neighbor",
+                    "label": f"R{r['row']} · {sec}",
+                    "confidence": 0.7 if st == "pass" else 0.5,
+                    "generator": f"section:{sec}",
+                })
+                seen.add(d)
+            if len(suggestions) >= 6: break
+
+    # 3. Shape templates if we still have room — handy when a user
+    #    types a section ref and wants to expand to canonical form.
+    if len(suggestions) < 6:
+        templates = [
+            {"text": f"เอกสาร {section} ... หน้า ?", "kind": "shape",
+             "label": "doc-ref (dot form)", "confidence": 0.3},
+            {"text": "ยินดีปฏิบัติตามข้อกำหนด", "kind": "shape",
+             "label": "commitment", "confidence": 0.3},
+        ]
+        for t in templates:
+            if t["text"] in seen: continue
+            suggestions.append(t)
+            seen.add(t["text"])
+            if len(suggestions) >= 6: break
+
+    # If user has typed a query, prefer suggestions whose text contains q
+    # (case-insensitive), but always keep AI proposal at top.
+    if q:
+        ql = q.casefold()
+        def _score(s):
+            t = s["text"].casefold()
+            kind_w = {"ai": 100, "neighbor": 50, "shape": 10}.get(s["kind"], 0)
+            match_w = 30 if ql in t else 0
+            start_w = 20 if t.startswith(ql) else 0
+            return -(kind_w + match_w + start_w + s.get("confidence", 0) * 10)
+        suggestions.sort(key=_score)
+
+    return jsonify({"ok": True, "row": row_num, "section": section,
+                    "suggestions": suggestions[:6]})
+
+
 @app.route("/api/row_context")
 def api_row_context():
     """Return rows surrounding the target row for the xlsx preview pane."""
@@ -4896,7 +4994,7 @@ INDEX_HTML = r"""<!doctype html>
   /* Layout */
   --topbar-h:    52px;
   --ribbon-h:    52px;             /* mode-tabs + sub-toolbar */
-  --statusbar-h: 30px;             /* bottom status strip */
+  --statusbar-h: 38px;             /* bottom status strip — tall enough for verdict pills (Phase A6) */
   --rail-w:      48px;             /* left activity rail (icon-only) */
   --rail-panel-w: 280px;           /* expanded panel that slides next to rail */
   --ai-w:        340px;            /* right AI pane */
@@ -5429,6 +5527,65 @@ body[data-mode="apply"] .ribbon-mode-bar.mode-apply { display: flex; }
   padding: 2px var(--s-3);
   margin-bottom: var(--s-3);
 }
+
+/* ── Phase B5: Patterns triggered (subsection inside Proposal) ──── */
+.ai-patterns {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-bg-soft);
+}
+.ai-patterns-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--t-xs); font-weight: 700;
+  color: var(--c-text-soft);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: var(--s-2);
+}
+.ai-patterns-head .ico { color: var(--c-text-soft); }
+.ai-patterns-count {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  background: var(--c-surface-3);
+  border-radius: 999px;
+  color: var(--c-text-soft);
+}
+.ai-pattern-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: var(--t-xs);
+  align-items: baseline;
+}
+.ai-pattern-row + .ai-pattern-row {
+  border-top: 1px dashed var(--c-divider);
+}
+.ai-pattern-type {
+  font-family: var(--f-mono);
+  color: var(--c-primary, var(--c-text));
+  font-weight: 600;
+  font-size: 11px;
+}
+.ai-pattern-trigger {
+  color: var(--c-text);
+  font-family: var(--f-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ai-pattern-meta {
+  display: inline-flex; gap: 6px;
+  color: var(--c-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.ai-pattern-conf {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--c-success-soft);
+  color: var(--c-success-text);
+  font-weight: 600;
+}
 .ai-actions {
   display: flex; gap: var(--s-2);
 }
@@ -5533,6 +5690,49 @@ body[data-mode="apply"] .ribbon-mode-bar.mode-apply { display: flex; }
   background: var(--c-primary);
   transition: width 0.3s var(--ease-out);
 }
+/* Phase A6: verdict pills moved from action bar to status bar */
+.status-bar .sb-row-info {
+  max-width: 38ch; overflow: hidden; text-overflow: ellipsis;
+}
+.status-bar .sb-verdict {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 3px;
+  background: var(--c-bg-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+}
+.status-bar .sb-vbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px;
+  height: 24px;
+  border: 0; background: transparent;
+  border-radius: 999px;
+  color: var(--c-text-soft);
+  font-size: var(--t-xs); font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.status-bar .sb-vbtn:hover { background: var(--c-surface-3); color: var(--c-text); }
+.status-bar .sb-vbtn .kbd {
+  margin-left: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  background: var(--c-surface-3);
+  color: var(--c-text-soft);
+  border-radius: 3px;
+  font-weight: 500;
+}
+.status-bar .sb-vbtn[aria-checked="true"].pass     { background: var(--c-success-soft); color: var(--c-success-text); }
+.status-bar .sb-vbtn[aria-checked="true"].fail     { background: var(--c-danger-soft);  color: var(--c-danger-text); }
+.status-bar .sb-vbtn[aria-checked="true"].fix      { background: var(--c-warn-soft);    color: var(--c-warn-text); }
+.status-bar .sb-vbtn[aria-checked="true"].skip     { background: var(--c-surface-3);    color: var(--c-text); }
+.status-bar .sb-vbtn[aria-checked="true"] .kbd     { background: rgba(0,0,0,0.10); color: inherit; }
+.status-bar .sb-vbtn.reset { padding: 3px 6px; color: var(--c-text-faint); }
+.status-bar .sb-vbtn.reset:hover { color: var(--c-text-soft); }
+/* Disable verdict pills when no row selected */
+body[data-row-selected="0"] .status-bar .sb-vbtn { opacity: 0.4; pointer-events: none; }
+
 .status-bar .sb-claude {
   display: inline-flex; align-items: center; gap: var(--s-2);
 }
@@ -6131,6 +6331,56 @@ select { cursor: pointer; }
 .col-d-menu button:hover { background: var(--c-surface-2); }
 .col-d-menu button .icon { font-size: 14px; width: 18px; text-align: center; }
 .col-d-menu button .label { flex: 1; }
+
+/* ── Phase B3: Col D autocomplete panel ────────────────────────── */
+.col-d-ac-panel {
+  position: fixed; z-index: 260;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-3);
+  padding: 4px;
+  min-width: 320px; max-width: 720px;
+  max-height: 280px; overflow-y: auto;
+  font-size: var(--t-sm);
+}
+.col-d-ac-panel .ac-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.col-d-ac-panel .ac-item.active { background: var(--c-primary-soft); }
+.col-d-ac-panel .ac-item:hover  { background: var(--c-surface-2); }
+.col-d-ac-panel .ac-item.active:hover { background: var(--c-primary-soft); }
+.col-d-ac-panel .ac-kind {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px; font-weight: 700;
+  border-radius: var(--r-sm);
+  background: var(--c-bg-soft); color: var(--c-text-soft);
+  flex-shrink: 0;
+}
+.col-d-ac-panel .ac-kind.ai       { background: var(--c-primary-soft); color: var(--c-primary-text, var(--c-primary)); }
+.col-d-ac-panel .ac-kind.neighbor { background: var(--c-success-soft); color: var(--c-success-text); }
+.col-d-ac-panel .ac-kind.shape    { background: var(--c-bg-soft); color: var(--c-text-faint); }
+.col-d-ac-panel .ac-text {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+  color: var(--c-text);
+}
+.col-d-ac-panel .ac-meta {
+  flex-shrink: 0;
+  font-size: var(--t-xs); color: var(--c-text-faint);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.col-d-ac-panel .ac-conf {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--c-surface-3); color: var(--c-text-soft);
+  font-variant-numeric: tabular-nums;
+}
 .col-d-menu button .hint { font-size: var(--t-xs); color: var(--c-text-faint); }
 .col-d-menu button.danger { color: var(--c-danger-text); }
 .col-d-menu button.danger:hover { background: var(--c-danger-soft); }
@@ -6735,16 +6985,19 @@ select { cursor: pointer; }
 }
 .ab-bottom .reset-btn:hover { color: var(--c-text); background: var(--c-surface-2); }
 
-/* ── Floating actions (bottom-LEFT, always visible) ──────────────
-   Survives any top overlay (browser extensions, Claude Preview MCP
-   toolbar, full-screen overlays) that might cover the topbar. */
+/* ── Floating actions (Phase A7: only visible in embedded mode) ──
+   The activity rail already provides Settings + Help in normal use.
+   FAB only kicks in when running inside Claude Preview MCP / iframe
+   where the topbar can be covered by host UI. */
 .floating-actions {
   position: fixed;
   bottom: calc(var(--action-bar-h) + var(--s-5));
   left: var(--s-5);
-  display: flex; flex-direction: column; gap: var(--s-3);
-  z-index: 90;            /* above content, below modals */
+  display: none;          /* hidden by default — rail covers normal case */
+  flex-direction: column; gap: var(--s-3);
+  z-index: 90;
 }
+body[data-embedded="1"] .floating-actions { display: flex; }
 .fab-btn {
   width: 40px; height: 40px;
   border-radius: 50%;
@@ -6776,25 +7029,40 @@ select { cursor: pointer; }
   .fab-btn { width: 36px; height: 36px; }
 }
 
-/* ── kbd-help (bottom-right hint) ───────────────────────────────── */
+/* ── kbd-help (Phase A7: collapsed badge — expands on hover) ──────
+   Live above the action bar, bottom-right. Collapses to a single "?"
+   so it doesn't compete with the catalog/AI panes. Hover to reveal
+   the full shortcut row. Hidden in embedded mode (less screen real
+   estate) — users press / for the help modal there. */
 .kbd-help {
-  position: fixed; bottom: var(--s-7); right: var(--s-7);
+  position: fixed;
+  bottom: calc(var(--action-bar-h) + var(--statusbar-h) + var(--s-5));
+  right: var(--s-5);
   font-size: var(--t-xs); color: var(--c-text-soft);
   background: var(--c-surface);
-  padding: var(--s-3) var(--s-5);
-  border-radius: var(--r-md);
+  padding: 4px 10px;
+  border-radius: 999px;
   border: 1px solid var(--c-border);
   box-shadow: var(--e-1);
-  display: inline-flex; gap: var(--s-5); align-items: center;
-  opacity: 0.6;
-  transition: opacity var(--d-base) var(--ease-std);
+  display: inline-flex; gap: var(--s-4); align-items: center;
+  opacity: 0.55;
   z-index: 50;
+  cursor: default;
+  max-width: 38px; overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 200ms var(--ease-out), opacity 120ms var(--ease-std);
 }
-.kbd-help:hover { opacity: 1; }
+.kbd-help::before {
+  content: '⌨';
+  font-size: 14px; line-height: 1; color: var(--c-text);
+  flex-shrink: 0;
+}
+.kbd-help:hover { opacity: 1; max-width: 600px; }
 .kbd-help .kbd-group {
   display: inline-flex; gap: 3px; align-items: center;
 }
 .kbd-help .kbd-text { color: var(--c-text-faint); margin-left: 2px; }
+body[data-embedded="1"] .kbd-help { display: none; }
 
 /* ── Sync banner ────────────────────────────────────────────────── */
 .sync-banner {
@@ -7963,7 +8231,26 @@ select { cursor: pointer; }
 
   <!-- ───── BOTTOM: Status Bar ──────────────────────────────────── -->
   <footer class="status-bar" role="status">
-    <span class="sb-section" id="sb-row-info">No row selected</span>
+    <span class="sb-section sb-row-info" id="sb-row-info">No row selected</span>
+    <span class="sb-sep"></span>
+    <!-- Phase A6: verdict pills moved here from action bar -->
+    <div class="sb-verdict" id="sb-verdict" role="radiogroup" aria-label="verdict (1-4)">
+      <button class="sb-vbtn pass" role="radio" aria-checked="false" data-verdict="pass" type="button" onclick="setStatus('pass')" title="ผ่าน · 1" aria-label="ผ่าน">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg><span>ผ่าน</span><span class="kbd" aria-hidden="true">1</span>
+      </button>
+      <button class="sb-vbtn fail" role="radio" aria-checked="false" data-verdict="fail" type="button" onclick="setStatus('fail')" title="ไม่ผ่าน · 2" aria-label="ไม่ผ่าน">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg><span>ไม่ผ่าน</span><span class="kbd" aria-hidden="true">2</span>
+      </button>
+      <button class="sb-vbtn fix" role="radio" aria-checked="false" data-verdict="need_fix" type="button" onclick="setStatus('need_fix')" title="ต้องแก้ · 3" aria-label="ต้องแก้">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-alert"/></svg><span>แก้</span><span class="kbd" aria-hidden="true">3</span>
+      </button>
+      <button class="sb-vbtn skip" role="radio" aria-checked="false" data-verdict="skip" type="button" onclick="setStatus('skip')" title="ข้าม · 4" aria-label="ข้าม">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-skip"/></svg><span>ข้าม</span><span class="kbd" aria-hidden="true">4</span>
+      </button>
+      <button class="sb-vbtn reset" type="button" onclick="setStatus('unverified')" title="reset verdict" aria-label="reset verdict">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-rotate"/></svg>
+      </button>
+    </div>
     <span class="sb-sep"></span>
     <span class="sb-section sb-progress" id="sb-progress">
       <strong id="sb-done">0</strong>/<strong id="sb-total">0</strong>
@@ -8440,38 +8727,16 @@ select { cursor: pointer; }
 </div>
 
 <!-- Docked action bar — always visible, content swaps based on selection -->
-<div class="action-bar is-empty" id="action-bar" role="toolbar" aria-label="row verdict">
-  <div class="ab-empty-msg">เลือก row เพื่อตัดสิน verdict</div>
+<!-- Phase A6: verdict pills moved to status bar; action bar focuses on
+     Auto/Mark/auto-next + free-form notes. -->
+<div class="action-bar is-empty" id="action-bar" role="toolbar" aria-label="row actions">
+  <div class="ab-empty-msg">เลือก row เพื่อทำงาน — verdict อยู่ที่ status bar (1–4)</div>
   <div class="ab-top">
     <div class="ab-row-info" id="ab-row-info">—</div>
     <div class="ab-flags" id="ab-flags"></div>
     <span class="ab-spacer"></span>
 
-    <!-- Verdict — segmented control (4 mutually-exclusive options) -->
-    <div class="verdict-control" role="radiogroup" aria-label="verdict">
-      <button class="ab-btn pass" role="radio" aria-checked="false" onclick="setStatus('pass')" aria-label="ผ่าน">
-        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>
-        <span class="vc-label">ผ่าน</span>
-        <span class="kbd" aria-hidden="true">1</span>
-      </button>
-      <button class="ab-btn fail" role="radio" aria-checked="false" onclick="setStatus('fail')" aria-label="ไม่ผ่าน">
-        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg>
-        <span class="vc-label">ไม่ผ่าน</span>
-        <span class="kbd" aria-hidden="true">2</span>
-      </button>
-      <button class="ab-btn fix" role="radio" aria-checked="false" onclick="setStatus('need_fix')" aria-label="ต้องแก้">
-        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-alert"/></svg>
-        <span class="vc-label">แก้</span>
-        <span class="kbd" aria-hidden="true">3</span>
-      </button>
-      <button class="ab-btn skip" role="radio" aria-checked="false" onclick="setStatus('skip')" aria-label="ข้าม">
-        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-skip"/></svg>
-        <span class="vc-label">ข้าม</span>
-        <span class="kbd" aria-hidden="true">4</span>
-      </button>
-    </div>
-
-    <!-- Secondary actions (Auto, Mark) — visually subordinate -->
+    <!-- Secondary actions (Auto, Mark) -->
     <div class="ab-secondary">
       <button class="ab-btn auto" onclick="showAutoAnnotate()" title="Auto-annotate (preview)">
         <svg class="ico ico-sm" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Auto</span>
@@ -8489,9 +8754,6 @@ select { cursor: pointer; }
   </div>
   <div class="ab-bottom">
     <textarea id="ab-notes" placeholder="บันทึก / Notes…" oninput="saveNotesDebounced()" aria-label="row notes"></textarea>
-    <button class="reset-btn" onclick="setStatus('unverified')" title="reset verdict">
-      <svg class="ico ico-sm" aria-hidden="true"><use href="#i-rotate"/></svg><span>reset</span>
-    </button>
   </div>
 </div>
 
@@ -9142,7 +9404,11 @@ function editColD(e, rowNum) {
   const sel = window.getSelection();
   sel.selectAllChildren(td);
 
+  // Phase B3: live autocomplete dropdown
+  const ac = _colDAcOpen(td, rowNum);
+
   const finish = async (commit) => {
+    _colDAcClose();
     td.contentEditable = 'false';
     td.classList.remove('editing');
     const newVal = td.textContent.trim();
@@ -9181,11 +9447,149 @@ function editColD(e, rowNum) {
     }
   };
 
-  td.addEventListener('blur', () => finish(true), {once: true});
+  td.addEventListener('blur', () => {
+    // Defer so a click on a suggestion can be processed first
+    setTimeout(() => { if (!_COL_D_AC || !_COL_D_AC._wasClicked) finish(true); }, 120);
+  }, {once: true});
   td.addEventListener('keydown', (ev) => {
+    // Phase B3: autocomplete keyboard nav (intercept before commit/cancel)
+    if (_COL_D_AC && _COL_D_AC.visible) {
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); _colDAcMove(1); return; }
+      if (ev.key === 'ArrowUp')   { ev.preventDefault(); _colDAcMove(-1); return; }
+      if (ev.key === 'Tab')       { ev.preventDefault(); _colDAcAcceptCurrent(td); return; }
+      if (ev.key === 'Enter' && _COL_D_AC.activeIdx >= 0 && !ev.shiftKey) {
+        ev.preventDefault(); _colDAcAcceptCurrent(td); return;
+      }
+    }
     if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); td.blur(); }
-    if (ev.key === 'Escape') { ev.preventDefault(); finish(false); td.blur(); }
+    if (ev.key === 'Escape') {
+      if (_COL_D_AC && _COL_D_AC.visible) { ev.preventDefault(); _colDAcClose(); return; }
+      ev.preventDefault(); finish(false); td.blur();
+    }
   });
+  td.addEventListener('input', () => _colDAcQueueRefresh(td, rowNum));
+}
+
+// ── Phase B3: Col D live autocomplete ─────────────────────────
+// Single-instance dropdown panel below the editing td. Fetches from
+// /api/row/col_d/suggest, debounced. Keyboard nav works through the
+// editColD keydown handler above.
+let _COL_D_AC = null;
+let _COL_D_AC_TIMER = 0;
+
+function _colDAcOpen(td, rowNum) {
+  _colDAcClose();
+  const panel = document.createElement('div');
+  panel.className = 'col-d-ac-panel';
+  panel.setAttribute('role', 'listbox');
+  panel.setAttribute('aria-label', 'Col D suggestions');
+  document.body.appendChild(panel);
+  _COL_D_AC = {panel, td, rowNum, items: [], activeIdx: -1, visible: false, _wasClicked: false};
+  _colDAcPosition();
+  // Reposition on resize / scroll inside the table
+  window.addEventListener('scroll', _colDAcPosition, true);
+  window.addEventListener('resize', _colDAcPosition);
+  // First fetch (no query)
+  _colDAcQueueRefresh(td, rowNum, 0);
+  return _COL_D_AC;
+}
+function _colDAcClose() {
+  if (!_COL_D_AC) return;
+  try { _COL_D_AC.panel.remove(); } catch (e) {}
+  window.removeEventListener('scroll', _colDAcPosition, true);
+  window.removeEventListener('resize', _colDAcPosition);
+  _COL_D_AC = null;
+  if (_COL_D_AC_TIMER) { clearTimeout(_COL_D_AC_TIMER); _COL_D_AC_TIMER = 0; }
+}
+function _colDAcPosition() {
+  if (!_COL_D_AC) return;
+  const r = _COL_D_AC.td.getBoundingClientRect();
+  const p = _COL_D_AC.panel;
+  p.style.left = Math.round(r.left) + 'px';
+  p.style.top  = Math.round(r.bottom + 4) + 'px';
+  p.style.minWidth = Math.round(r.width) + 'px';
+}
+function _colDAcQueueRefresh(td, rowNum, delay) {
+  if (delay === undefined) delay = 250;
+  if (_COL_D_AC_TIMER) clearTimeout(_COL_D_AC_TIMER);
+  _COL_D_AC_TIMER = setTimeout(() => _colDAcRefresh(td, rowNum), delay);
+}
+async function _colDAcRefresh(td, rowNum) {
+  if (!_COL_D_AC) return;
+  const q = (td.textContent || '').trim();
+  try {
+    const r = await fetch(`/api/row/col_d/suggest?row=${rowNum}&q=${encodeURIComponent(q)}`);
+    const j = await r.json();
+    if (!_COL_D_AC) return;  // closed during request
+    if (!j.ok) { _COL_D_AC.panel.style.display = 'none'; _COL_D_AC.visible = false; return; }
+    _colDAcRender(j.suggestions || []);
+  } catch (e) { /* swallow */ }
+}
+function _colDAcRender(items) {
+  if (!_COL_D_AC) return;
+  _COL_D_AC.items = items;
+  _COL_D_AC.activeIdx = items.length ? 0 : -1;
+  if (!items.length) {
+    _COL_D_AC.panel.style.display = 'none';
+    _COL_D_AC.visible = false;
+    return;
+  }
+  _COL_D_AC.panel.style.display = '';
+  _COL_D_AC.visible = true;
+  _COL_D_AC.panel.innerHTML = items.map((s, i) => {
+    const conf = s.confidence ? `<span class="ac-conf">${Math.round(s.confidence*100)}%</span>` : '';
+    const cls = i === _COL_D_AC.activeIdx ? 'ac-item active' : 'ac-item';
+    const kindLbl = ({ai:'AI', neighbor:'Neighbor', shape:'Shape'})[s.kind] || s.kind;
+    return `<div class="${cls}" data-i="${i}" role="option" aria-selected="${i === _COL_D_AC.activeIdx}">
+      <span class="ac-kind ${s.kind}">${escapeHtml(kindLbl)}</span>
+      <span class="ac-text">${escapeHtml(s.text)}</span>
+      <span class="ac-meta">${escapeHtml(s.label || '')}${conf}</span>
+    </div>`;
+  }).join('');
+  // Mouse interactions
+  _COL_D_AC.panel.querySelectorAll('.ac-item').forEach(el => {
+    el.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      _COL_D_AC._wasClicked = true;
+      const i = parseInt(el.dataset.i);
+      _COL_D_AC.activeIdx = i;
+      _colDAcAcceptCurrent(_COL_D_AC.td);
+    });
+    el.addEventListener('mouseenter', () => {
+      _COL_D_AC.activeIdx = parseInt(el.dataset.i);
+      _colDAcRefreshActive();
+    });
+  });
+}
+function _colDAcRefreshActive() {
+  if (!_COL_D_AC) return;
+  _COL_D_AC.panel.querySelectorAll('.ac-item').forEach((el, i) => {
+    el.classList.toggle('active', i === _COL_D_AC.activeIdx);
+    el.setAttribute('aria-selected', i === _COL_D_AC.activeIdx ? 'true' : 'false');
+  });
+}
+function _colDAcMove(delta) {
+  if (!_COL_D_AC || !_COL_D_AC.items.length) return;
+  const n = _COL_D_AC.items.length;
+  _COL_D_AC.activeIdx = ((_COL_D_AC.activeIdx + delta) % n + n) % n;
+  _colDAcRefreshActive();
+}
+function _colDAcAcceptCurrent(td) {
+  if (!_COL_D_AC || _COL_D_AC.activeIdx < 0) return;
+  const item = _COL_D_AC.items[_COL_D_AC.activeIdx];
+  if (!item) return;
+  td.textContent = item.text;
+  // Place caret at end
+  const range = document.createRange();
+  range.selectNodeContents(td);
+  range.collapse(false);
+  const sel2 = window.getSelection();
+  sel2.removeAllRanges();
+  sel2.addRange(range);
+  _colDAcClose();
+  // Fire input event so any listener (including our debounced refresh)
+  // sees the new value, but next blur/Enter will commit it.
+  td.dispatchEvent(new Event('input'));
 }
 
 // ── Col D context dropdown menu ───────────────────────────────
@@ -12637,6 +13041,37 @@ function aiPaneRender(row, plan) {
   const rationale = plan && plan.llm ? (plan.llm.rationale || '') : '';
   const escalation = plan && plan.llm ? plan.llm.escalation : null;
 
+  // Phase B5: which learned patterns fired? Pull from plan.provenance —
+  // this is what auto_annotate_plan attaches when apply_learned_brand /
+  // apply_learned_vendor / etc. return a hit. Each entry is keyed by
+  // its role (brand, vendor, …) and carries pattern_type, trigger,
+  // confidence, samples.
+  const provenance = (plan && plan.provenance) || {};
+  const triggered = [];
+  for (const [role, prov] of Object.entries(provenance)) {
+    if (!prov || prov.kind !== 'learned') continue;
+    triggered.push({
+      role,
+      pattern_type: prov.pattern_type || 'pattern',
+      trigger: prov.trigger || '',
+      confidence: prov.confidence || 0,
+      samples: prov.samples || 0,
+    });
+  }
+  const patternsSection = triggered.length ? `
+    <div class="ai-patterns" aria-label="patterns triggered">
+      <div class="ai-patterns-head">${ico('brain',12)}<span>Patterns triggered</span><span class="ai-patterns-count">${triggered.length}</span></div>
+      ${triggered.map(t => `
+        <div class="ai-pattern-row" title="role: ${escapeHtml(t.role)}">
+          <span class="ai-pattern-type">${escapeHtml(t.pattern_type)}</span>
+          <span class="ai-pattern-trigger">${escapeHtml(t.trigger)}</span>
+          <span class="ai-pattern-meta">
+            <span class="ai-pattern-conf">${Math.round(t.confidence*100)}%</span>
+            <span class="ai-pattern-samples">${t.samples} samples</span>
+          </span>
+        </div>`).join('')}
+    </div>` : '';
+
   const propSection = `
     <div class="ai-section">
       <h4>${ico('sparkles',14)}<span>Proposal</span> <span style="margin-left:auto;font-weight:500;text-transform:none;letter-spacing:0;color:var(--c-text-soft)">${escapeHtml(generator)}</span></h4>
@@ -12649,6 +13084,7 @@ function aiPaneRender(row, plan) {
            </div>`
         : '<div style="font-style:italic;color:var(--c-text-faint);font-size:var(--t-sm)">No proposal</div>'}
       ${rationale ? `<div class="ai-rationale">${escapeHtml(rationale)}</div>` : ''}
+      ${patternsSection}
       ${escalation ? `
         <div style="background:var(--c-warn-soft);border-left:3px solid var(--c-warn);padding:var(--s-3) var(--s-4);border-radius:0 var(--r-sm) var(--r-sm) 0;font-size:var(--t-xs);color:var(--c-warn-text);margin:var(--s-3) 0">
           <strong>Claude is uncertain:</strong><br>${escapeHtml(escalation.question || '')}
@@ -12810,16 +13246,21 @@ function statusBarUpdate() {
   const sbRow = document.getElementById('sb-row-info');
   if (!sbRow) return;
   const r = SELECTED_ROW ? ROWS_BY_NUM[SELECTED_ROW] : null;
+  // Phase A6: row-selected attr drives whether verdict pills are clickable
+  document.body.setAttribute('data-row-selected', r ? '1' : '0');
   if (r) {
-    const status = (DATA?.status?.[SELECTED_ROW]?.status) || 'unverified';
-    const pillCls = status !== 'unverified' ? `sb-pill ${status}` : '';
-    const pillTxt = ({pass:'✓ Pass', fail:'✗ Fail', need_fix:'⚠ Fix', skip:'⏭ Skip'})[status] || 'unverified';
     const sec = r.section || '?';
-    const summary = (r.D || r.B || '').toString().slice(0, 80).trim();
-    sbRow.innerHTML = `<strong>R${r.row}</strong> · ${escapeHtml(sec)} ${pillCls ? '· <span class="' + pillCls + '">' + pillTxt + '</span>' : ''} <span style="color:var(--c-text-faint);margin-left:6px">${escapeHtml(summary)}</span>`;
+    const summary = (r.D || r.B || '').toString().slice(0, 60).trim();
+    sbRow.innerHTML = `<strong>R${r.row}</strong> · ${escapeHtml(sec)} <span style="color:var(--c-text-faint);margin-left:6px">${escapeHtml(summary)}</span>`;
   } else {
-    sbRow.textContent = 'No row selected · click a row in the tree';
+    sbRow.textContent = 'No row selected';
   }
+  // Phase A6: highlight the active verdict pill
+  const status = (r && DATA?.status?.[SELECTED_ROW]?.status) || 'unverified';
+  document.querySelectorAll('#sb-verdict .sb-vbtn[data-verdict]').forEach(btn => {
+    const isActive = btn.dataset.verdict === status;
+    btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+  });
   // Progress
   if (DATA?.stats) {
     const status = DATA.status || {};
