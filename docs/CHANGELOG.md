@@ -1765,3 +1765,122 @@ steps. Everything else is occasional.
 - **Calm Mode default + opt-out > Pro default + opt-in**: most
   users never change defaults. Setting the bar at "minimal" by
   default ships the redesign to everyone immediately.
+
+---
+
+## Calm Mode polish — readability + live edit feedback + R12 highlight
+
+User feedback:
+1. *"สีตัวอักษรของตาราง comply อ่านยากเกินไป"* — Comply table is hard to read
+2. *"เพิ่มฟังก์ชันเวลา edit pdf annotate ให้แสดงสิ่งที่กำลังแก้ไข
+   แบบ real-time"* — Real-time visual feedback while editing
+3. *"เพิ่มระบบ realtime reload highlight เพราะเจอว่า R12 ใน pdf
+   catalog highlight ไม่ขึ้น"* — Realtime reload, R12 has no highlight
+
+### Fix #1 — Table readability
+
+Root cause: base CSS used `var(--t-sm)` (13px) on `.xlsx-table` with
+no explicit `color`. In Calm Mode the `--c-text-soft` and `--c-text-faint`
+were too gray (Apple's secondary scale ~`#86868b`/`#b0b0b8`) which read
+fine for sparse UI but felt washed-out on dense table cells.
+
+Changes (base + Calm-specific):
+- `.xlsx-table` font bumped 13 → 14 px, line-height 1.55 → 1.6
+- Explicit `color: var(--c-text)` on `.xlsx-table td` so cells don't
+  inherit through unexpected paths
+- Cols B/C/D get `color: var(--c-text)` (full strength) + Col C/D get
+  `font-weight: 500`
+- Col A bumped from `--c-text-soft` → `--c-text-muted` (one shade
+  darker)
+- `.row-num` bumped from `--c-text-faint` → `--c-text-soft` (was
+  unreadable on white at `#b0b0b8`)
+- Calm Mode override: hardcoded `#1d1d1f` for primary cells, `#6e6e73`
+  for secondary, no vertical dividers (only horizontals — Apple Mail
+  style), 14px padding, generous 1.6 line-height
+- Calm Mode `tr.target` changed to warm `#fff7d8` with 3px left border
+  in orange — the hovered "you're here" cue is unmistakable
+
+### Fix #2 — Live edit HUD
+
+When user is dragging/resizing/drawing annotations, a small dark pill
+floats near the cursor showing:
+```
+◇ Moving · 124 × 32 pt · at (210, 460)
+```
+- Dark frosted background (`rgba(28,28,30,0.94)` + `backdrop-filter: blur(12px)`)
+- Operation label in white, dimensions in orange (warn color), position in muted gray
+- 80 ms fade-in animation
+- Mounted on `<body>` to escape any clipping context
+- Auto-positions next to cursor with viewport clamping
+- Updates on every `pointermove` event (no extra polling)
+- Auto-hides on `pointerup`
+
+Hooked into the existing pointermove handler — only adds 4 calls to
+`_updateEditHud(...)` for the three edit modes (move / resize /
+drawRect). Performance impact negligible (just `textContent` updates).
+
+### Fix #3 — Highlight reload + R12 root cause
+
+**R12's diagnosis**:
+- Col B = `"          3) มีช่องเสียบไฟฟ้า จำนวนไม่น้อยกว่า 12 ช่อง"`
+- Col D = `"5.1.1.1-3 ช่องเสียบไฟฟ้า G7-00012"` (filename_format)
+- `parsed = {type: 'filename_format', raw: ...}` — no `item`/`subitem` keys
+- `computeHighlight(r)` had no branch for `filename_format` →
+  returned `null` → no highlight ever passed to `loadPdf`
+
+**Two-part fix**:
+
+1. **Improved `computeHighlight`** with two new fallback rules:
+   ```js
+   // Pattern A: Col D dash-form like "5.1.1.1-3 ..." → "ข้อ 3)"
+   if (typeof r.D === 'string') {
+     const m = r.D.match(/^[\d.]+-(\d+)\s/);
+     if (m) return `ข้อ ${m[1]})`;
+   }
+   // Pattern B: Col B's leading "  N)" prefix → "ข้อ N)"
+   if (typeof r.B === 'string') {
+     const m = r.B.match(/^\s*(\d+)\)/);
+     if (m) return `ข้อ ${m[1]})`;
+   }
+   ```
+   Verified on R12: now returns `'ข้อ 3)'` correctly.
+   Same fix helps all `filename_format` rows (R12, R13, etc.) and
+   any row whose `parsed.item` is missing but Col B starts with a
+   number.
+
+2. **New "↻ Reload highlight" button** in PDF toolbar:
+   - Re-fetches `/api/index` (in case Col B/D were edited)
+   - Recomputes highlight
+   - Calls `loadPdf(rel, page, hl)` to bust any cached overlay
+   - Auto-enables `#hl-toggle` if it was off
+   - Toasts the resolved highlight string for confirmation
+   - Toasts a clear warning if the highlight can't be derived
+     (suggests editing Col B/D)
+
+### Verification
+
+```
+$ uv run pytest -q
+36 passed in 5.96s
+
+$ uv run ruff check .
+All checks passed!
+
+R12 highlight derivation:
+  R12: parsed=filename_format → highlight='ข้อ 3)'  ✓ (was None)
+  R13: parsed=filename_format → highlight='ข้อ 4)'  ✓
+  R14: parsed=brand_model     → highlight='ยี่ห้อ|รุ่น'  ✓
+```
+
+### Lessons
+
+- **Don't trust inheritance for table cells** — explicitly set
+  `color` on `td`. Different ancestors set different colors and
+  one stray `color: var(--c-text-faint)` on a parent would silently
+  wash out the whole table.
+- **HUD should follow the cursor** but stay clear of the action.
+  18px offset + viewport clamping + 80 ms fade-in is enough to feel
+  Apple-grade without animation libs.
+- **Highlight rules should fall back gracefully**: if structured
+  parse fails, look at the raw text. The user's intent is usually
+  expressed in Col B's leading "N)" — that's the source of truth.

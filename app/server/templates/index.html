@@ -1519,15 +1519,19 @@ select { cursor: pointer; }
 
 /* ── XLSX preview ───────────────────────────────────────────────── */
 .xlsx-wrap { flex: 1; overflow: auto; background: var(--c-bg); }
-.xlsx-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--t-sm); }
+.xlsx-table {
+  width: 100%; border-collapse: separate; border-spacing: 0;
+  font-size: 14px;                  /* bumped from --t-sm for readability */
+  line-height: 1.55;
+  color: var(--c-text);             /* explicit dark text */
+}
 .xlsx-table thead th {
   position: sticky; top: 0; z-index: 1;
   background: var(--c-surface-3);
-  color: var(--c-text);
   padding: var(--s-3) var(--s-5);
   border-bottom: 1px solid var(--c-border-strong);
   border-right: 1px solid var(--c-border);
-  font-size: var(--t-xs);
+  font-size: 11px;
   font-weight: 700;
   text-align: left; white-space: nowrap;
   letter-spacing: 0.04em; text-transform: uppercase;
@@ -1540,18 +1544,24 @@ select { cursor: pointer; }
   padding: var(--s-4) var(--s-5);
   vertical-align: top; white-space: pre-wrap; word-break: break-word;
   background: var(--c-surface);
+  color: var(--c-text);             /* explicit — was inheriting + getting overridden in places */
   transition: background var(--d-fast) var(--ease-std);
 }
 .xlsx-table td:last-child { border-right: none; }
-.xlsx-table .col-A { width: 56px; font-family: var(--f-mono); color: var(--c-text-soft); }
-.xlsx-table .col-B { width: 28%; }
-.xlsx-table .col-C { width: 28%; }
-.xlsx-table .col-D { width: 24%; }
-.xlsx-table .col-E { width: 80px; font-size: var(--t-xs); }
-.xlsx-table .col-F { width: 110px; font-size: var(--t-xs); color: var(--c-text-soft); }
+.xlsx-table .col-A {
+  width: 56px; font-family: var(--f-mono); font-size: 13px;
+  color: var(--c-text-muted);       /* bumped from --c-text-soft for contrast */
+}
+.xlsx-table .col-B { width: 28%; color: var(--c-text); }
+.xlsx-table .col-C { width: 28%; color: var(--c-text); font-weight: 500; }
+.xlsx-table .col-D { width: 24%; color: var(--c-text); font-weight: 500; }
+.xlsx-table .col-E { width: 80px; font-size: 12px; color: var(--c-text-soft); }
+.xlsx-table .col-F { width: 110px; font-size: 12px; color: var(--c-text-soft); }
 .xlsx-table .row-num {
-  width: 42px; font-family: var(--f-mono); font-size: var(--t-xs);
-  color: var(--c-text-faint); background: var(--c-surface-2);
+  width: 42px; font-family: var(--f-mono); font-size: 12px;
+  color: var(--c-text-soft);        /* bumped from --c-text-faint (was way too light) */
+  background: var(--c-surface-2);
+  font-weight: 600;
 }
 .xlsx-table tr:hover td { background: var(--c-surface-2); }
 .xlsx-table tr.target td {
@@ -1988,6 +1998,51 @@ select { cursor: pointer; }
   stroke-width: 2; stroke-dasharray: 4 2; pointer-events: none;
 }
 .pdf-canvas.edit-mode { background: var(--c-canvas-edit); }
+
+/* ── Real-time edit HUD (Tesla/Apple HUD-style) ─────────────────────
+   Floats near the cursor while user is dragging/resizing/drawing,
+   shows current operation + rect dimensions. */
+.edit-hud {
+  position: fixed;
+  z-index: 340;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(28,28,30,0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: rgba(255,255,255,0.95);
+  border-radius: 999px;
+  font: 500 12px var(--f-mono);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.20);
+  white-space: nowrap;
+  animation: hud-fadein 80ms ease-out;
+}
+.edit-hud.show { display: inline-flex; }
+.edit-hud .hud-op {
+  color: rgba(255,255,255,1);
+  font-weight: 600;
+}
+.edit-hud .hud-sep {
+  width: 1px; height: 12px;
+  background: rgba(255,255,255,0.20);
+  align-self: center;
+}
+.edit-hud .hud-dims {
+  color: var(--c-warn, #ff9500);
+  font-weight: 600;
+}
+.edit-hud .hud-pos {
+  color: rgba(255,255,255,0.6);
+  font-size: 11px;
+}
+@keyframes hud-fadein {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 /* ── Phase A5: floating annotation toolbar (Acrobat-style) ───────────
    Appears above the currently selected annotation in edit mode. Lives
@@ -3813,6 +3868,54 @@ body[data-ux-mode="calm"] .center-pane .info {
   color: var(--c-text-soft); font-size: 13px;
 }
 
+/* Comply table — readable like a document, not a dense grid */
+body[data-ux-mode="calm"] .xlsx-table {
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: #1d1d1f;                  /* hardcoded for max contrast on white */
+}
+body[data-ux-mode="calm"] .xlsx-table td {
+  padding: 14px 16px;              /* generous breathing room */
+  border-color: rgba(0,0,0,0.06);  /* very subtle dividers */
+  border-right: 0;                 /* drop vertical lines, keep horizontals */
+}
+body[data-ux-mode="calm"] .xlsx-table thead th {
+  background: transparent;
+  border-bottom: 1px solid rgba(0,0,0,0.12);
+  color: #6e6e73;
+  font-size: 10.5px;
+  padding: 12px 16px;
+}
+body[data-ux-mode="calm"] .xlsx-table .col-B,
+body[data-ux-mode="calm"] .xlsx-table .col-C,
+body[data-ux-mode="calm"] .xlsx-table .col-D {
+  color: #1d1d1f;
+}
+body[data-ux-mode="calm"] .xlsx-table .col-A,
+body[data-ux-mode="calm"] .xlsx-table .col-E,
+body[data-ux-mode="calm"] .xlsx-table .col-F {
+  color: #6e6e73;                  /* secondary info */
+}
+body[data-ux-mode="calm"] .xlsx-table .row-num {
+  background: transparent;
+  color: #86868b;
+  font-size: 12px;
+  font-weight: 500;
+}
+body[data-ux-mode="calm"] .xlsx-table tr:hover td {
+  background: #f5f5f7;
+}
+body[data-ux-mode="calm"] .xlsx-table tr.target td {
+  background: #fff7d8;             /* warmer highlight */
+  border-left: 3px solid #ff9500;
+}
+/* Edit-mode Col D (when user double-clicks to edit) */
+body[data-ux-mode="calm"] .xlsx-table td.editing {
+  background: #fff8e1;
+  outline: 2px solid var(--c-primary);
+  outline-offset: -2px;
+}
+
 /* ── PDF pane: minimal chrome ──────────────────────────────────── */
 body[data-ux-mode="calm"] .pdf-pane {
   background: var(--c-bg-soft);
@@ -4343,6 +4446,7 @@ body[data-ux-mode="calm"] .calm-mode-hint { display: block; }
       </div>
       <div class="tb-sep"></div>
       <label title="ไฮไลต์เนื้อหาที่ตรงกับ row"><input type="checkbox" id="hl-toggle" checked onchange="renderPdf()"> highlight</label>
+      <button onclick="reloadHighlight()" title="ดึง highlight ใหม่ (กรณีไม่ขึ้น เช่น R12) — retry text match" aria-label="reload highlight"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg></button>
       <button onclick="openInBrowser()" title="เปิดใน browser tab ใหม่" aria-label="เปิดใน browser"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-external"/></svg></button>
     </div>
     <!-- Edit toolbar (visible only in edit mode) -->
@@ -6056,7 +6160,7 @@ async function revertColDToCommitment(rowNum) {
 
 // ── Catalog PDF ────────────────────────────────────────────────
 function computeHighlight(r) {
-  const p = r.parsed;
+  const p = r.parsed || {};
   if (p.type === 'brand_model') return 'ยี่ห้อ|รุ่น';
   // Trailing period is what real annotation labels use ("ข้อย่อย 1.").
   // It's redundant for the structured matcher but safer if older annotations
@@ -6064,7 +6168,63 @@ function computeHighlight(r) {
   if (p.item != null && p.subitem != null) return `ข้อ ${p.item}) ข้อย่อย ${p.subitem}.`;
   if (p.subitem != null) return `ข้อย่อย ${p.subitem}.`;
   if (p.item != null) return `ข้อ ${p.item})`;
+
+  // Fix R12-class rows (filename_format / dash form like 5.1.1.1-3):
+  // Col D contains "Section-N" → highlight "N)" if Col B starts with that
+  // number. Falls through to using Col B's leading number directly.
+  if (typeof r.D === 'string') {
+    const m = r.D.match(/^[\d.]+-(\d+)\s/);
+    if (m) return `ข้อ ${m[1]})`;
+  }
+  if (typeof r.B === 'string') {
+    // Col B often starts with "  N)" — grab that
+    const m = r.B.match(/^\s*(\d+)\)/);
+    if (m) return `ข้อ ${m[1]})`;
+  }
   return null;
+}
+
+// Real-time highlight reload — re-computes highlight from current row
+// and forces PDF re-render. Used by the Reload button in PDF toolbar
+// when a highlight isn't showing (e.g., R12) or after the user has
+// edited Col B/D and wants the highlight to refresh.
+async function reloadHighlight() {
+  if (!SELECTED_ROW) {
+    toast('Pick a row first', '', 'warn', 2000);
+    return;
+  }
+  // Refresh ROWS_BY_NUM via /api/index in case the row was edited
+  try {
+    const idx = await fetch('/api/index').then(r => r.json());
+    DATA = idx;
+    ROWS_BY_NUM = Object.fromEntries(idx.rows.map(r => [r.row, r]));
+  } catch (e) {}
+  const r = ROWS_BY_NUM[SELECTED_ROW];
+  if (!r) {
+    toast('Row not found', `R${SELECTED_ROW}`, 'error', 3000);
+    return;
+  }
+  if (!r.pdf_rel) {
+    toast('No PDF', `R${SELECTED_ROW} has no catalog PDF`, 'warn', 3000);
+    return;
+  }
+  // Re-compute highlight string and force a fresh load (busting any cache)
+  const hl = computeHighlight(r);
+  CURRENT_HIGHLIGHT = hl;
+  if (!hl) {
+    toast('No highlight derivable',
+          `R${SELECTED_ROW} has no item / subitem markers — try editing Col B/D first`,
+          'warn', 4500);
+    // Still re-render to clear any stale highlight
+    if (CURRENT_PDF) renderPdf();
+    return;
+  }
+  // Make sure highlight checkbox is on
+  const hlToggle = document.getElementById('hl-toggle');
+  if (hlToggle && !hlToggle.checked) hlToggle.checked = true;
+  // Bust cache by reloading the PDF entirely
+  await loadPdf(r.pdf_rel, r.parsed?.page || PDF_PAGE || 1, hl);
+  toast('✓ Highlight reloaded', `R${SELECTED_ROW} → "${hl}"`, 'info', 2500);
 }
 async function loadPdf(rel, page, highlight) {
   CURRENT_PDF = {rel, meta: null};
@@ -6586,6 +6746,7 @@ document.addEventListener('pointermove', e => {
     const o = DRAG_STATE.origRect;
     DRAG_STATE.ann.rect = [o[0]+dx, o[1]+dy, o[2]+dx, o[3]+dy];
     refreshOverlay();
+    _updateEditHud(DRAG_STATE.mode, DRAG_STATE.ann.rect, e);
   } else if (DRAG_STATE.mode === 'resize') {
     const dx = px - DRAG_STATE.start[0], dy = py - DRAG_STATE.start[1];
     const o = DRAG_STATE.origRect;
@@ -6600,9 +6761,14 @@ document.addEventListener('pointermove', e => {
     if (r[1] > r[3]) [r[1], r[3]] = [r[3], r[1]];
     DRAG_STATE.ann.rect = r;
     refreshOverlay();
+    _updateEditHud(DRAG_STATE.mode, r, e);
   } else if (DRAG_STATE.mode === 'drawRect') {
     DRAG_STATE.cur = [px, py];
     drawPreviewRect();
+    const [x0, y0] = DRAG_STATE.start, [x1, y1] = DRAG_STATE.cur;
+    const r = [Math.min(x0,x1), Math.min(y0,y1),
+                Math.max(x0,x1), Math.max(y0,y1)];
+    _updateEditHud('drawRect', r, e);
   }
 });
 document.addEventListener('pointerup', e => {
@@ -6629,7 +6795,54 @@ document.addEventListener('pointerup', e => {
     if (prev) prev.remove();
   }
   DRAG_STATE = null;
+  _hideEditHud();
 });
+
+// Real-time edit HUD — floating panel showing current operation +
+// rect dimensions while user is dragging/drawing. Mounted on body
+// (escapes any stacking context); driven by pointermove events only.
+let _EDIT_HUD = null;
+function _ensureEditHud() {
+  if (_EDIT_HUD) return _EDIT_HUD;
+  const hud = document.createElement('div');
+  hud.id = 'edit-hud';
+  hud.className = 'edit-hud';
+  hud.innerHTML = `
+    <span class="hud-op"></span>
+    <span class="hud-sep"></span>
+    <span class="hud-dims"></span>
+    <span class="hud-pos"></span>
+  `;
+  document.body.appendChild(hud);
+  _EDIT_HUD = hud;
+  return hud;
+}
+function _updateEditHud(op, rect, e) {
+  const hud = _ensureEditHud();
+  const x0 = Math.round(rect[0]), y0 = Math.round(rect[1]);
+  const w = Math.round(rect[2] - rect[0]), h = Math.round(rect[3] - rect[1]);
+  const opLabel = ({move: '◇ Moving', resize: '⤢ Resizing',
+                     drawRect: '+ Drawing rect'})[op] || op;
+  hud.querySelector('.hud-op').textContent = opLabel;
+  hud.querySelector('.hud-dims').textContent = `${w} × ${h} pt`;
+  hud.querySelector('.hud-pos').textContent = `at (${x0}, ${y0})`;
+  hud.classList.add('show');
+  // Position near the cursor (offset so it doesn't cover the action)
+  const px = (e && e.clientX) || window.innerWidth / 2;
+  const py = (e && e.clientY) || 100;
+  let left = px + 18, top = py + 18;
+  // Clamp to viewport
+  const W = hud.offsetWidth || 240, H = hud.offsetHeight || 36;
+  if (left + W > window.innerWidth - 8) left = px - W - 18;
+  if (top + H > window.innerHeight - 8) top = py - H - 18;
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
+  hud.style.left = left + 'px';
+  hud.style.top = top + 'px';
+}
+function _hideEditHud() {
+  if (_EDIT_HUD) _EDIT_HUD.classList.remove('show');
+}
 
 // Helper: push current state to undo stack (BEFORE applying a change).
 function _commitBeforeChange() {
