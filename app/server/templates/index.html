@@ -1591,6 +1591,35 @@ select { cursor: pointer; }
 .xlsx-table td.col-D.commitment::before {
   content: '⚠ '; color: var(--c-warn); font-style: normal;
 }
+.xlsx-table td.col-D.not-found .d-text {
+  color: var(--c-danger-text); font-style: italic; font-weight: 500;
+}
+.xlsx-table td.col-D.not-found::before {
+  content: '🔴 '; font-style: normal;
+}
+.xlsx-table td.col-D.empty .d-text::before {
+  content: '— ว่าง —'; color: var(--c-text-faint); font-style: italic;
+}
+
+/* Inline "📍 Annotate" button — appears on Col D cell when row needs proof */
+.xlsx-table .d-quick-annotate {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 11px; font-weight: 600;
+  border: 1px solid var(--c-primary);
+  background: var(--c-primary-soft);
+  color: var(--c-primary-text);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: all 100ms;
+}
+.xlsx-table .d-quick-annotate:hover {
+  background: var(--c-primary);
+  color: white;
+  transform: translateY(-1px);
+}
 .xlsx-table td.col-D.editing {
   background: var(--c-purple-soft) !important;
   outline: 2px solid var(--c-purple);
@@ -3562,37 +3591,37 @@ body[data-embedded="1"] .kbd-help { display: none; }
    ╚════════════════════════════════════════════════════════════════╝ */
 
 body[data-ux-mode="calm"] {
-  /* Apple-inspired neutral palette ------------------------------- */
+  /* High-contrast palette for max readability (WCAG AA / AAA) ----- */
   --c-bg:           #ffffff;
   --c-surface:      #ffffff;
-  --c-surface-2:    #f5f5f7;
-  --c-surface-3:    #e8e8ed;
-  --c-bg-soft:      #fafafa;
-  --c-text:         #1d1d1f;
-  --c-text-soft:    #6e6e73;
-  --c-text-muted:   #86868b;
-  --c-text-faint:   #b0b0b8;
-  --c-border:       #e5e5ea;
-  --c-border-strong:#d2d2d7;
-  --c-divider:      #f5f5f7;
+  --c-surface-2:    #f2f2f5;            /* was #f5f5f7 — darker for visibility */
+  --c-surface-3:    #e0e0e6;            /* was #e8e8ed */
+  --c-bg-soft:      #f9f9fb;
+  --c-text:         #0a0a0c;            /* was #1d1d1f — max black */
+  --c-text-soft:    #3d3d42;            /* was #6e6e73 — 9:1 contrast (was 4.6:1) */
+  --c-text-muted:   #5d5d62;            /* was #86868b — passes WCAG AA */
+  --c-text-faint:   #82828a;            /* was #b0b0b8 — readable now */
+  --c-border:       #d2d2d7;            /* was #e5e5ea — more visible */
+  --c-border-strong:#a8a8ad;
+  --c-divider:      #e5e5ea;            /* was #f5f5f7 — visible separator */
 
-  /* Single accent — Apple blue */
-  --c-primary:        #0071e3;
-  --c-primary-hover:  #0058b8;
-  --c-primary-soft:   #e8f0fb;
-  --c-primary-text:   #0066cc;
+  /* Single accent — Apple blue (slightly darker for AA contrast) */
+  --c-primary:        #0066cc;          /* was #0071e3 */
+  --c-primary-hover:  #004fa3;
+  --c-primary-soft:   #dceaf8;          /* was #e8f0fb — more saturated */
+  --c-primary-text:   #004fa3;
 
-  /* Status colors — kept but desaturated */
-  --c-success:        #34c759;
-  --c-success-soft:   #e7f5ec;
-  --c-success-text:   #14913f;
-  --c-warn:           #ff9500;
-  --c-warn-soft:      #fff4e5;
-  --c-warn-text:      #b25f00;
-  --c-danger:         #ff3b30;
-  --c-danger-soft:    #ffeae8;
-  --c-danger-text:    #b51500;
-  --c-info:           #5ac8fa;
+  /* Status colors — darker variants for better readability on white */
+  --c-success:        #1a7a4f;          /* was #34c759 — passes WCAG AA */
+  --c-success-soft:   #d4f0dc;
+  --c-success-text:   #0e5430;
+  --c-warn:           #9a5a00;          /* was #ff9500 */
+  --c-warn-soft:      #ffe7c2;
+  --c-warn-text:      #683d00;
+  --c-danger:         #c91511;          /* was #ff3b30 */
+  --c-danger-soft:    #fcd9d6;
+  --c-danger-text:    #87100c;
+  --c-info:           #006a99;
   --c-canvas-edit:    #fafafa;
 
   /* Type — SF Pro */
@@ -3624,23 +3653,43 @@ body[data-ux-mode="calm"] {
 @media (prefers-color-scheme: dark) {
   body[data-ux-mode="calm"][data-theme="dark"],
   body[data-ux-mode="calm"]:not([data-theme="light"]) {
-    --c-bg:        #000000;
-    --c-surface:   #1c1c1e;
-    --c-surface-2: #2c2c2e;
-    --c-surface-3: #3a3a3c;
-    --c-bg-soft:   #1c1c1e;
-    --c-text:      #f5f5f7;
-    --c-text-soft: #aeaeb2;
-    --c-text-muted:#8e8e93;
-    --c-text-faint:#48484a;
-    --c-border:    #38383a;
-    --c-border-strong:#48484a;
-    --c-divider:   #2c2c2e;
-    --c-primary:        #0a84ff;
-    --c-primary-soft:   rgba(10,132,255,0.14);
-    --c-primary-text:   #5ac8fa;
-    --c-canvas-edit: #1c1c1e;
+    --c-bg:           #000000;
+    --c-surface:      #161618;          /* was #1c1c1e — slightly darker = more contrast w/ text */
+    --c-surface-2:    #232326;          /* was #2c2c2e */
+    --c-surface-3:    #34343a;          /* was #3a3a3c */
+    --c-bg-soft:      #131316;
+    --c-text:         #ffffff;          /* was #f5f5f7 — pure white max contrast */
+    --c-text-soft:    #dededf;          /* was #aeaeb2 — much brighter (15:1) */
+    --c-text-muted:   #a8a8ae;          /* was #8e8e93 — passes WCAG AA */
+    --c-text-faint:   #7a7a82;          /* was #48484a — was unreadably dark */
+    --c-border:       #48484a;          /* was #38383a — visible */
+    --c-border-strong:#5a5a5e;
+    --c-divider:      #2c2c2e;          /* was #2c2c2e — kept */
+
+    --c-primary:        #3b9aff;        /* was #0a84ff — brighter for dark bg */
+    --c-primary-hover:  #5fb0ff;
+    --c-primary-soft:   rgba(59,154,255,0.20);
+    --c-primary-text:   #7ec0ff;
+
+    --c-success:        #5fd87f;        /* was #34c759 — brighter */
+    --c-success-soft:   rgba(95,216,127,0.18);
+    --c-success-text:   #aaeebd;
+    --c-warn:           #ffb44d;        /* was #ff9500 — brighter */
+    --c-warn-soft:      rgba(255,180,77,0.18);
+    --c-warn-text:      #ffd49b;
+    --c-danger:         #ff6b62;        /* was #ff3b30 — brighter */
+    --c-danger-soft:    rgba(255,107,98,0.18);
+    --c-danger-text:    #ff9b95;
+    --c-info:           #5ac8fa;
+    --c-canvas-edit:    #1a1a1d;
   }
+}
+
+/* Force light mode if user explicitly chose light */
+body[data-ux-mode="calm"][data-theme="light"] {
+  --c-bg:           #ffffff;
+  --c-surface:      #ffffff;
+  --c-text:         #0a0a0c;
 }
 
 /* ── Topbar: slim, blurred, frosted ─────────────────────────────── */
@@ -3764,44 +3813,61 @@ body[data-ux-mode="calm"] .status-bar .sb-section:has(#sb-save-state) {
   display: none !important;
 }
 
-/* Verdict pills: BIG, primary action visible */
+/* Verdict pills: BIG, primary action visible, high-contrast inactive state */
 body[data-ux-mode="calm"] .status-bar .sb-verdict {
   background: var(--c-surface-2);
   padding: 4px;
   border-radius: var(--r-pill);
-  border: 0;
+  border: 1px solid var(--c-divider);
   margin: 0 auto;
 }
 body[data-ux-mode="calm"] .sb-vbtn {
-  height: 32px;
-  padding: 6px 16px;
+  height: 34px;
+  padding: 6px 18px;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;                   /* bold inactive labels too */
+  color: var(--c-text-soft);          /* visible inactive label */
   border-radius: var(--r-pill);
+  letter-spacing: -0.005em;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+body[data-ux-mode="calm"] .sb-vbtn:hover {
+  background: var(--c-surface-3);
+  color: var(--c-text);
 }
 body[data-ux-mode="calm"] .sb-vbtn .kbd {
-  background: transparent;
-  color: inherit;
-  opacity: 0.55;
+  background: var(--c-surface-3);
+  color: var(--c-text-muted);
+  opacity: 0.85;
   font-size: 10px;
-  padding: 0;
+  padding: 1px 5px;
   margin-left: 2px;
+  border-radius: 3px;
+  font-weight: 600;
 }
 body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].pass {
   background: var(--c-primary); color: white;
-  box-shadow: 0 1px 3px rgba(0,113,227,0.3);
+  box-shadow: 0 2px 6px rgba(0,102,204,0.35);
 }
 body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].fail {
   background: var(--c-danger); color: white;
-  box-shadow: 0 1px 3px rgba(255,59,48,0.3);
+  box-shadow: 0 2px 6px rgba(201,21,17,0.35);
 }
 body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].fix {
   background: var(--c-warn); color: white;
+  box-shadow: 0 2px 6px rgba(154,90,0,0.30);
 }
 body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].skip {
   background: var(--c-text-soft); color: white;
 }
-body[data-ux-mode="calm"] .sb-vbtn.reset { color: var(--c-text-faint); }
+body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"] .kbd {
+  background: rgba(255,255,255,0.25); color: white;
+}
+body[data-ux-mode="calm"] .sb-vbtn.reset {
+  color: var(--c-text-muted);
+  padding: 6px 10px;
+}
+body[data-ux-mode="calm"] .sb-vbtn.reset:hover { color: var(--c-text); }
 body[data-ux-mode="calm"] .sb-progress {
   font-size: 12px; color: var(--c-text-muted);
   font-variant-numeric: tabular-nums;
@@ -3868,52 +3934,67 @@ body[data-ux-mode="calm"] .center-pane .info {
   color: var(--c-text-soft); font-size: 13px;
 }
 
-/* Comply table — readable like a document, not a dense grid */
+/* Comply table — readable like a document, not a dense grid.
+   Uses theme variables so light + dark both stay max-contrast. */
 body[data-ux-mode="calm"] .xlsx-table {
   font-size: 14.5px;
   line-height: 1.6;
-  color: #1d1d1f;                  /* hardcoded for max contrast on white */
+  color: var(--c-text);
 }
 body[data-ux-mode="calm"] .xlsx-table td {
-  padding: 14px 16px;              /* generous breathing room */
-  border-color: rgba(0,0,0,0.06);  /* very subtle dividers */
-  border-right: 0;                 /* drop vertical lines, keep horizontals */
+  padding: 14px 16px;
+  border-color: var(--c-divider);
+  border-right: 0;                 /* horizontals only */
 }
 body[data-ux-mode="calm"] .xlsx-table thead th {
-  background: transparent;
-  border-bottom: 1px solid rgba(0,0,0,0.12);
-  color: #6e6e73;
-  font-size: 10.5px;
+  background: var(--c-bg-soft);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-soft);
+  font-size: 10.5px; font-weight: 700;
   padding: 12px 16px;
+  letter-spacing: 0.06em;
 }
 body[data-ux-mode="calm"] .xlsx-table .col-B,
 body[data-ux-mode="calm"] .xlsx-table .col-C,
 body[data-ux-mode="calm"] .xlsx-table .col-D {
-  color: #1d1d1f;
+  color: var(--c-text);            /* full strength */
 }
 body[data-ux-mode="calm"] .xlsx-table .col-A,
 body[data-ux-mode="calm"] .xlsx-table .col-E,
 body[data-ux-mode="calm"] .xlsx-table .col-F {
-  color: #6e6e73;                  /* secondary info */
+  color: var(--c-text-soft);
 }
 body[data-ux-mode="calm"] .xlsx-table .row-num {
-  background: transparent;
-  color: #86868b;
+  background: var(--c-bg-soft);
+  color: var(--c-text-muted);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
 }
 body[data-ux-mode="calm"] .xlsx-table tr:hover td {
-  background: #f5f5f7;
+  background: var(--c-surface-2);
 }
 body[data-ux-mode="calm"] .xlsx-table tr.target td {
-  background: #fff7d8;             /* warmer highlight */
-  border-left: 3px solid #ff9500;
+  background: var(--c-warn-soft);
+  border-left: 3px solid var(--c-warn);
+}
+body[data-ux-mode="calm"] .xlsx-table tr.target .col-A,
+body[data-ux-mode="calm"] .xlsx-table tr.target .row-num {
+  background: var(--c-warn-soft);
+  color: var(--c-warn-text); font-weight: 700;
 }
 /* Edit-mode Col D (when user double-clicks to edit) */
 body[data-ux-mode="calm"] .xlsx-table td.editing {
-  background: #fff8e1;
+  background: var(--c-primary-soft);
   outline: 2px solid var(--c-primary);
   outline-offset: -2px;
+}
+
+/* Tree row in dark mode — make sure selected/hover stay readable */
+body[data-ux-mode="calm"] .tree-row {
+  color: var(--c-text);
+}
+body[data-ux-mode="calm"] .tree-row .tree-flags {
+  color: var(--c-warn-text);
 }
 
 /* ── PDF pane: minimal chrome ──────────────────────────────────── */
@@ -5718,12 +5799,24 @@ async function loadXlsx(rowNum) {
     // double-click triggers inline editing; left-click selects the row (default).
     const dVal = row.D || '';
     const dCommit = dVal.trim().startsWith('ยินดีปฏิบัติ');
-    const dCls = 'col-D editable' + (dCommit ? ' commitment' : ' has-ref');
+    const dEmpty  = !dVal.trim();
+    const dNotFound = dVal.includes('ไม่พบใน catalog');
+    const dCls = 'col-D editable' + (dCommit ? ' commitment' : ' has-ref')
+               + (dEmpty ? ' empty' : '')
+               + (dNotFound ? ' not-found' : '');
+    // Per-row "📍 Annotate" inline button — visible only when row has a
+    // catalog PDF AND Col D is empty/commitment/not-found (rows still
+    // needing visual proof). Direct entry to manual-annotate flow with
+    // auto-derived label header from row position.
+    const showQuick = row.pdf_rel && (dEmpty || dCommit || dNotFound);
     html += `<td class="${dCls}"
              oncontextmenu="onColDContextMenu(event, ${row.row})"
              ondblclick="editColD(event, ${row.row})"
              title="คลิกขวา → เปิดเมนู · ดับเบิลคลิก → แก้ไขในช่อง">`;
     html += `<span class="d-text">${escapeHtml(dVal)}</span>`;
+    if (showQuick) {
+      html += `<button class="d-quick-annotate" onclick="quickAnnotateRow(event, ${row.row})" title="📍 ลาก rect ใน catalog เพื่อ comply (auto-label)">📍 Annotate</button>`;
+    }
     html += `</td>`;
     html += `<td class="col-E">${row.E ? `<span class="vendor-tag ${row.E}">${escapeHtml(row.E)}</span>` : ''}</td>`;
     html += `<td class="col-F">${escapeHtml(row.F||'')}</td>`;
@@ -7696,6 +7789,17 @@ async function startManualAnnotate() {
   // for commitment rows that have no PDF yet (or the user wants to add
   // a fresh annotation).
   await _startWizard('manual');
+}
+
+// Inline "📍 Annotate" button on Col D cell — selects the row first
+// then opens the same manual-annotate wizard. One click vs the older
+// two-step flow (click row → click action bar Mark).
+async function quickAnnotateRow(event, rowNum) {
+  if (event) { event.stopPropagation(); event.preventDefault(); }
+  if (typeof selectRow === 'function' && rowNum !== SELECTED_ROW) {
+    await selectRow(rowNum);
+  }
+  await startManualAnnotate();
 }
 
 async function startReannotate() {

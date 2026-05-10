@@ -3382,6 +3382,29 @@ def api_auto_annotate_apply():
                                   "confidence": plan.get("confidence")},
                          actor="user")
         except Exception: pass
+
+        # Bind row → catalog (same record auto + manual + apply_catalog all share)
+        try:
+            proj = catalog.get_active_project()
+            pdf_rel = plan.get("pdf_rel")
+            if proj and pdf_rel:
+                with db.conn() as c:
+                    cat_row = c.execute(
+                        "SELECT catalog_id FROM catalogs WHERE pdf_rel = ?",
+                        (pdf_rel,),
+                    ).fetchone()
+                if cat_row:
+                    annots = plan.get("annotations") or []
+                    page = annots[0]["page"] if annots and "page" in annots[0] else None
+                    catalog.bind_row_to_catalog(
+                        project_id=int(proj["project_id"]),
+                        row_num=row_num,
+                        catalog_id=int(cat_row["catalog_id"]),
+                        page=page,
+                        col_d_text=plan.get("proposed_d") or "",
+                    )
+        except Exception as e:
+            sys.stderr.write(f"[auto_apply] catalog bind failed: {e}\n")
     return jsonify({"ok": result.get("ok"), "result": result, "plan": plan})
 
 
@@ -3457,8 +3480,21 @@ def api_auto_annotate_batch_apply():
 #      manual override as strong learning feedback.
 # ---------------------------------------------------------------------------
 
-def _label_for_row(role_info: dict) -> str:
-    """SKILL.md label for a Square's FreeText partner."""
+def _label_for_row(role_info: dict, row: dict | None = None) -> str:
+    """SKILL.md label for a Square's FreeText partner.
+
+    Auto-derives the catalog FreeText header from the row's position in
+    the comply sheet so the same catalog inserted at different rows
+    gets context-correct labels (e.g. "5.1.1.2 ข้อ 3)" vs "5.2.1.6
+    ข้อย่อย 4.").
+
+    Fallback chain (in order):
+      1. role_info has structured item / sub_item → use them
+      2. row's Col D matches "{section}-N ..." dash form → "ข้อ N)"
+      3. row's Col B starts with "  N) ..." → "ข้อ N)"
+      4. row's Col B starts with "  N.M ..." → "ข้อย่อย M."
+      5. just the section
+    """
     role = role_info.get("role")
     section = role_info.get("section") or ""
     if role == "sub_item":
@@ -3468,6 +3504,24 @@ def _label_for_row(role_info: dict) -> str:
         return f"{section} ข้อย่อย {role_info['sub_num']}."
     if role == "item":
         return f"{section} ข้อ {role_info['item_num']})"
+
+    # Fallbacks for filename_format / non-standard rows (e.g. R12) ----
+    if row is not None:
+        d_text = (row.get("D") or "")
+        b_text = (row.get("B") or "")
+        # Dash form "5.1.1.1-3 ..." → item 3
+        m = re.match(r"^[\d.]+-(\d+)\s", d_text)
+        if m:
+            return f"{section} ข้อ {m.group(1)})"
+        # Col B leading "  N) ..."
+        m = re.match(r"^\s*(\d+)\)", b_text)
+        if m:
+            return f"{section} ข้อ {m.group(1)})"
+        # Col B leading "  N.M ..."
+        m = re.match(r"^\s*\d+\.(\d+)", b_text)
+        if m:
+            return f"{section} ข้อย่อย {m.group(1)}."
+
     return section
 
 
@@ -3575,7 +3629,7 @@ def api_manual_context():
         "pdf_rel": pdf_rel,
         "pdf_meta": _meta(pdf_rel) if pdf_rel else None,
         "candidates": candidates,
-        "suggested_label": _label_for_row(role_info),
+        "suggested_label": _label_for_row(role_info, row),
     })
 
 
@@ -3604,7 +3658,7 @@ def api_manual_save():
         return jsonify({"ok": False, "error": "PDF not found"}), 404
 
     role_info = detect_row_role(row_num)
-    label_text = (data.get("label_text") or _label_for_row(role_info)).strip()
+    label_text = (data.get("label_text") or _label_for_row(role_info, row)).strip()
 
     # Pre-snapshot
     _run_version_cmd(["snap", f"pre-manual-row-{row_num}"], timeout=60)
@@ -3671,6 +3725,27 @@ def api_manual_save():
                               "annots_errors": pdf_result.get("errors", 0)},
                      actor="user")
     except Exception: pass
+
+    # Update row_catalog_links so the catalog browser knows this row is
+    # bound to this catalog at this page. Looks up catalog_id by pdf_rel.
+    try:
+        proj = catalog.get_active_project()
+        if proj:
+            with db.conn() as c:
+                cat_row = c.execute(
+                    "SELECT catalog_id FROM catalogs WHERE pdf_rel = ?",
+                    (pdf_rel,),
+                ).fetchone()
+            if cat_row:
+                catalog.bind_row_to_catalog(
+                    project_id=int(proj["project_id"]),
+                    row_num=row_num,
+                    catalog_id=int(cat_row["catalog_id"]),
+                    page=page,
+                    col_d_text=new_d,
+                )
+    except Exception as e:
+        sys.stderr.write(f"[manual_save] catalog bind failed: {e}\n")
     try:
         learning.record_feedback(
             row_num=row_num,

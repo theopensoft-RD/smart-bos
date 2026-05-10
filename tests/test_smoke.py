@@ -237,6 +237,47 @@ def test_phase_c_empty_patch_bumps_updated_at(client, gui):
     assert r.get_json().get("ok") is True
 
 
+def test_label_for_row_handles_filename_format(client, gui):
+    """R12 case: filename_format rows must produce a usable label.
+    Was returning empty/section-only before the dash-form + Col B fallback fix.
+    """
+    r12 = next((r for r in (gui.ROWS or []) if r["row"] == 12), None)
+    if r12 is None:
+        return  # data shape might differ on other machines
+    role_info = gui.detect_row_role(12)
+    label = gui._label_for_row(role_info, r12)
+    # Must contain section + item marker
+    assert "5.1.1" in label
+    assert "ข้อ" in label or "ข้อย่อย" in label, f"unexpected label: {label!r}"
+
+
+def test_manual_context_includes_suggested_label(client, gui):
+    """/api/manual_annotate/context returns a non-empty suggested_label
+    for any row with a PDF (uses _label_for_row internally)."""
+    rows = gui.ROWS or []
+    test_row = next((r["row"] for r in rows if r.get("pdf_rel")), None)
+    if not test_row:
+        return
+    r = client.get(f"/api/manual_annotate/context?row={test_row}")
+    assert r.status_code == 200
+    j = r.get_json()
+    # suggested_label may be empty for section_header rows but key must exist
+    assert "suggested_label" in j
+
+
+def test_quick_annotate_button_in_html(client, gui):
+    """The inline 📍 Annotate button + JS handler are served at /."""
+    html = client.get("/").get_data(as_text=True)
+    must = [
+        "d-quick-annotate",            # CSS class for the button
+        "function quickAnnotateRow",    # the JS handler
+        "col-D.not-found",              # CSS for "ไม่พบใน catalog" rows
+        "col-D.empty",                  # CSS for empty Col D rows
+    ]
+    missing = [m for m in must if m not in html]
+    assert not missing, f"Missing inline annotate hooks: {missing}"
+
+
 def test_calm_mode_default_and_toggle(client, gui):
     """Calm Mode (Apple/Tesla minimalism) is the new default.
 

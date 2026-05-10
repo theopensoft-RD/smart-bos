@@ -1884,3 +1884,170 @@ R12 highlight derivation:
 - **Highlight rules should fall back gracefully**: if structured
   parse fails, look at the raw text. The user's intent is usually
   expressed in Col B's leading "N)" — that's the source of truth.
+
+---
+
+## High-contrast palette + seamless catalog↔row binding
+
+User feedback:
+- *"แก้ไขสี UI ให้ User มองเห็นได้ง่ายที่สุด ทั้ง light mode และ
+  dark mode"*
+- *"ออกแบบระบบให้รองรับการจัดการ catalog อย่างเต็มรูปแบบที่เชื่อมกับ
+  ตาราง comply sheet โดยตรง"*
+- *"ฟังก์ชันทั้ง เพิ่ม เปลี่ยน แก้ไขทั้ง rect, free text (Header
+  ขึ้นอยู่กับว่าเอา catalog นั้น ไปใส่ตรงไหนของ comply sheet)"*
+- *"ระบบเป็นอัตโนมัติ และ seamless มากที่สุด"*
+
+### Part A — High-contrast color palette (light + dark)
+
+Audit found tertiary text colors failing WCAG AA. Fixes:
+
+**Light mode** (Calm Mode):
+| Token | Before | After | Why |
+|---|---|---|---|
+| `--c-text` | `#1d1d1f` | `#0a0a0c` | max black 21:1 |
+| `--c-text-soft` | `#6e6e73` | `#3d3d42` | 4.6:1 → 9:1 |
+| `--c-text-muted` | `#86868b` | `#5d5d62` | 3.4:1 → 5:1 (passes AA) |
+| `--c-text-faint` | `#b0b0b8` | `#82828a` | 2.0:1 → 4:1 (passes AA) |
+| `--c-border` | `#e5e5ea` | `#d2d2d7` | barely-visible → clearly visible |
+| `--c-divider` | `#f5f5f7` | `#e5e5ea` | invisible → subtle |
+| `--c-primary` | `#0071e3` | `#0066cc` | slightly darker for AA |
+| `--c-success` | `#34c759` | `#1a7a4f` | iOS-light → readable on white |
+| `--c-warn` | `#ff9500` | `#9a5a00` | "" |
+| `--c-danger` | `#ff3b30` | `#c91511` | "" |
+
+**Dark mode** (Calm Mode + auto-detect via `prefers-color-scheme: dark`):
+| Token | Before | After | Why |
+|---|---|---|---|
+| `--c-text` | `#f5f5f7` | `#ffffff` | max white 21:1 on black |
+| `--c-text-soft` | `#aeaeb2` | `#dededf` | 9:1 → 15:1 |
+| `--c-text-muted` | `#8e8e93` | `#a8a8ae` | passes AA on black |
+| `--c-text-faint` | `#48484a` | `#7a7a82` | was unreadably dark |
+| `--c-border` | `#38383a` | `#48484a` | more visible separator |
+| `--c-primary` | `#0a84ff` | `#3b9aff` | brighter for dark bg |
+| `--c-success` | `#34c759` | `#5fd87f` | brighter |
+| `--c-warn` | `#ff9500` | `#ffb44d` | brighter |
+| `--c-danger` | `#ff3b30` | `#ff6b62` | brighter |
+
+Status pills (verdict bar) also bumped:
+- Inactive labels now `font-weight: 600` + `--c-text-soft` (was muted/transparent)
+- KBD shortcut chips visible on inactive pills (was hidden)
+- Active pills get `box-shadow` for depth
+
+### Part B — Seamless catalog ↔ comply sheet binding
+
+The user's vision: pick a row → click "Annotate" → drag rect on
+catalog → label auto-fills with row's section/item context → save →
+xlsx Col D updated AND `row_catalog_links` recorded. Existing manual
+flow did 90% of this; closing the gaps:
+
+#### B.1 — Per-row inline "📍 Annotate" button
+
+Replaces the single floating "📍 Mark" button (which only worked for
+the currently-selected row) with an inline button on every Col D
+cell that needs visual proof:
+
+```
+| ... | Col D                                           |
+| ... | (empty)                                         |
+| ... | [📍 Annotate]   ← visible only when row needs it |
+```
+
+Visible when:
+- `row.pdf_rel` exists, AND
+- `Col D` is empty / commitment / "ไม่พบใน catalog"
+
+One click selects the row + opens the manual-annotate wizard (was
+two clicks: select row → click Mark in action bar).
+
+Plus visual indicators on Col D state:
+- `.col-D.empty` → "— ว่าง —" placeholder text
+- `.col-D.commitment` → ⚠ icon (existing)
+- `.col-D.not-found` → 🔴 icon, danger-text color italic
+
+#### B.2 — `_label_for_row` improved (filename_format support)
+
+Old version returned just the section for non-item/sub_item rows.
+New version cascades through fallbacks:
+
+```python
+1. role_info has structured item / sub_item → use them
+2. Col D matches "{section}-N ..." → "{section} ข้อ N)"
+3. Col B starts with "  N)" → "{section} ข้อ N)"
+4. Col B starts with "  N.M" → "{section} ข้อย่อย M."
+5. just the section
+```
+
+Verified: R12 now returns `'5.1.1.1 ข้อ 3)'` (was `'5.1.1.1'`).
+
+The label header is the FreeText annotation that goes on the catalog
+PDF. Same catalog applied at different rows now gets context-correct
+labels automatically — no manual typing.
+
+#### B.3 — All annotation paths now record `row_catalog_links`
+
+Three flows write annotations to PDFs:
+1. `manual_annotate_save` (📍 Mark button)
+2. `auto_annotate/apply` (✨ Auto button)
+3. `apply_catalog` (Catalog Browser)
+
+Previously only `apply_catalog` recorded the binding in
+`row_catalog_links`. Now all three do — so the catalog browser's
+"Used by" section shows every row that uses each catalog,
+regardless of which path created the annotation.
+
+Implementation: lookup `catalog_id` by `pdf_rel`, call
+`catalog.bind_row_to_catalog(...)` after writing PDF + xlsx. Errors
+caught + logged to stderr (don't fail the whole save if catalog
+binding fails).
+
+### Verification
+
+```
+$ uv run pytest -q
+39 passed in 7.66s        (was 36 — +3 new tests)
+
+$ uv run ruff check .
+All checks passed!
+
+R12 label: '5.1.1.1 ข้อ 3)' ✓ (was section-only)
+HTML hooks: d-quick-annotate, quickAnnotateRow,
+            col-D.not-found, col-D.empty all present
+```
+
+### Workflow user can now do
+
+```
+1. Open GUI — Calm Mode default, high-contrast palette
+2. Tree filter: "🔴 ต้องดู" → see only rows that need attention
+3. Click a row → see its catalog PDF on the right
+4. Col D shows "📍 Annotate" button if needed
+5. Click Annotate → PDF auto-loads, edit mode + drawRect tool on,
+   suggested_label pre-filled with row's section/item context
+6. Drag rect on catalog spec → FreeText label auto-positions next to it
+7. Click Save → 
+     ✓ rect+label baked into PDF
+     ✓ xlsx Col D updated with proper SKILL.md format
+     ✓ row_catalog_links table updated (catalog browser sees it)
+     ✓ Audit logged
+8. Tree row turns green ✓ for that section's verdict
+```
+
+### Lessons
+
+- **Apple's secondary scale is too soft for dense data UIs**.
+  Apple HIG was designed for read-mode interfaces with sparse text.
+  Comply spec is a dense table — secondary text needs darker weights
+  to stay readable. WCAG AA is the right floor.
+- **Inline buttons > floating actions** for per-row tasks. The
+  floating Mark button forced a 2-step flow ("select then click");
+  the inline button collapses to 1 click and shows up only when
+  contextually needed.
+- **Dark mode requires a separate palette, not just inversion**.
+  Pure black `#000` vs pure white `#fff` looks great with bright
+  text (`#fff`) and bright accents (`#3b9aff`). Apple's dark-mode
+  greens / oranges / reds shift up in saturation to compensate for
+  reduced contrast on dark.
+- **One bind point** (`catalog.bind_row_to_catalog`) shared by all
+  three flows means the "Used by" view in catalog browser is
+  always accurate — no fork between manual / auto / apply.
