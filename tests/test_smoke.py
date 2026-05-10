@@ -237,6 +237,33 @@ def test_phase_c_empty_patch_bumps_updated_at(client, gui):
     assert r.get_json().get("ok") is True
 
 
+def test_calm_mode_default_and_toggle(client, gui):
+    """Calm Mode (Apple/Tesla minimalism) is the new default.
+
+    The HTML must serve:
+      - data-ux-mode CSS rules
+      - topbar More menu (entry to hidden features)
+      - toggleUxMode JS function
+      - calm-mode hint
+      - Calm Mode palette variables (Apple blue #0071e3)
+      - SF Pro font stack
+    """
+    r = client.get("/")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    must = [
+        'data-ux-mode="calm"',          # CSS scope
+        "function applyUxMode",          # boot-time IIFE
+        "function toggleUxMode",         # toggle handler
+        "topbar-more-popover",           # advanced features access
+        "calm-mode-hint",                # bottom-left hint
+        "#0071e3",                       # Apple blue accent
+        "SF Pro Display",                # font stack
+    ]
+    missing = [m for m in must if m not in html]
+    assert not missing, f"Calm Mode hooks missing: {missing}"
+
+
 def test_continuity_endpoint(client, gui):
     """/api/continuity returns the latest STATE markdown if present."""
     r = client.get("/api/continuity")

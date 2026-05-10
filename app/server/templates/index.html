@@ -3498,6 +3498,466 @@ body[data-embedded="1"] .kbd-help { display: none; }
   .pane { border: none; height: auto; }
   body { background: white; }
 }
+
+/* ╔════════════════════════════════════════════════════════════════╗
+   ║  CALM MODE  —  Apple + Tesla minimalism                        ║
+   ║  Activated via body[data-ux-mode="calm"] (default)             ║
+   ║  Hides everything that isn't part of the user-proof core loop. ║
+   ║  Toggle to "pro" via topbar menu → "Show all controls".        ║
+   ╚════════════════════════════════════════════════════════════════╝ */
+
+body[data-ux-mode="calm"] {
+  /* Apple-inspired neutral palette ------------------------------- */
+  --c-bg:           #ffffff;
+  --c-surface:      #ffffff;
+  --c-surface-2:    #f5f5f7;
+  --c-surface-3:    #e8e8ed;
+  --c-bg-soft:      #fafafa;
+  --c-text:         #1d1d1f;
+  --c-text-soft:    #6e6e73;
+  --c-text-muted:   #86868b;
+  --c-text-faint:   #b0b0b8;
+  --c-border:       #e5e5ea;
+  --c-border-strong:#d2d2d7;
+  --c-divider:      #f5f5f7;
+
+  /* Single accent — Apple blue */
+  --c-primary:        #0071e3;
+  --c-primary-hover:  #0058b8;
+  --c-primary-soft:   #e8f0fb;
+  --c-primary-text:   #0066cc;
+
+  /* Status colors — kept but desaturated */
+  --c-success:        #34c759;
+  --c-success-soft:   #e7f5ec;
+  --c-success-text:   #14913f;
+  --c-warn:           #ff9500;
+  --c-warn-soft:      #fff4e5;
+  --c-warn-text:      #b25f00;
+  --c-danger:         #ff3b30;
+  --c-danger-soft:    #ffeae8;
+  --c-danger-text:    #b51500;
+  --c-info:           #5ac8fa;
+  --c-canvas-edit:    #fafafa;
+
+  /* Type — SF Pro */
+  --f-base: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+            "SF Pro Text", "Inter", "Sarabun", system-ui, sans-serif;
+  --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --t-base: 14px;
+  --t-sm:   13px;
+  --t-xs:   12px;
+
+  /* Spacing — more breathing room */
+  --s-1: 2px; --s-2: 4px; --s-3: 8px; --s-4: 12px;
+  --s-5: 16px; --s-6: 20px; --s-7: 28px; --s-8: 36px;
+
+  /* Radii — softer */
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  /* Shadows — barely there */
+  --e-1: 0 1px 2px rgba(0,0,0,0.04);
+  --e-2: 0 2px 8px rgba(0,0,0,0.06);
+  --e-3: 0 8px 24px rgba(0,0,0,0.08);
+  --e-4: 0 16px 48px rgba(0,0,0,0.10);
+
+  font-feature-settings: "ss01" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.005em;
+}
+
+@media (prefers-color-scheme: dark) {
+  body[data-ux-mode="calm"][data-theme="dark"],
+  body[data-ux-mode="calm"]:not([data-theme="light"]) {
+    --c-bg:        #000000;
+    --c-surface:   #1c1c1e;
+    --c-surface-2: #2c2c2e;
+    --c-surface-3: #3a3a3c;
+    --c-bg-soft:   #1c1c1e;
+    --c-text:      #f5f5f7;
+    --c-text-soft: #aeaeb2;
+    --c-text-muted:#8e8e93;
+    --c-text-faint:#48484a;
+    --c-border:    #38383a;
+    --c-border-strong:#48484a;
+    --c-divider:   #2c2c2e;
+    --c-primary:        #0a84ff;
+    --c-primary-soft:   rgba(10,132,255,0.14);
+    --c-primary-text:   #5ac8fa;
+    --c-canvas-edit: #1c1c1e;
+  }
+}
+
+/* ── Topbar: slim, blurred, frosted ─────────────────────────────── */
+body[data-ux-mode="calm"] .topbar {
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  height: 48px;
+  padding: 0 var(--s-6);
+}
+body[data-ux-mode="calm"] .topbar-brand {
+  font-weight: 500;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+body[data-ux-mode="calm"] .topbar-brand .logo { display: none; }
+body[data-ux-mode="calm"] .topbar-brand .sub {
+  color: var(--c-text-muted); font-weight: 400; margin-left: 4px;
+}
+/* Hide noisy topbar pills/badges */
+body[data-ux-mode="calm"] .topbar-context,
+body[data-ux-mode="calm"] .topbar-project,
+body[data-ux-mode="calm"] .topbar-continuity,
+body[data-ux-mode="calm"] .stats-pill,
+body[data-ux-mode="calm"] #theme-toggle,
+body[data-ux-mode="calm"] .topbar-actions > button:not(.icon-only):not(.ucalm-keep),
+body[data-ux-mode="calm"] .topbar-menu-btn { display: none !important; }
+/* The single ⌘K + … menu in topbar */
+body[data-ux-mode="calm"] .topbar-actions {
+  gap: 4px;
+}
+body[data-ux-mode="calm"] .topbar-actions .topbar-btn {
+  background: transparent;
+  border: 0;
+  color: var(--c-text-soft);
+  padding: 6px 10px;
+  border-radius: var(--r-md);
+  font-size: 13px;
+}
+body[data-ux-mode="calm"] .topbar-actions .topbar-btn:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+/* ── Activity rail: hide everything except Tree + ⋯ ─────────────── */
+body[data-ux-mode="calm"] .activity-rail {
+  background: var(--c-bg);
+  border-right: 1px solid var(--c-divider);
+  width: 48px;
+  padding: var(--s-4) 0;
+}
+body[data-ux-mode="calm"] .activity-rail .rail-btn {
+  width: 36px; height: 36px; margin: 2px auto;
+  border-radius: var(--r-md);
+  color: var(--c-text-muted);
+}
+body[data-ux-mode="calm"] .activity-rail .rail-btn:hover {
+  background: var(--c-surface-2); color: var(--c-text);
+}
+body[data-ux-mode="calm"] .activity-rail .rail-btn.active {
+  background: var(--c-surface-2); color: var(--c-text);
+}
+body[data-ux-mode="calm"] .activity-rail .rail-btn.active::before { display: none; }
+/* Hide rail buttons except Tree (panel="tree") + the new ucalm-more */
+body[data-ux-mode="calm"] .activity-rail .rail-btn:not([data-panel="tree"]):not(.ucalm-more) {
+  display: none;
+}
+
+/* ── Ribbon (mode tabs): hide entirely in Calm Mode ─────────────── */
+body[data-ux-mode="calm"] .context-ribbon { display: none !important; }
+
+/* ── AI pane: hide by default; reveal via topbar ⋯ menu ─────────── */
+body[data-ux-mode="calm"] .ai-pane,
+body[data-ux-mode="calm"][data-ai-pane="0"] .ai-pane { display: none !important; }
+body[data-ux-mode="calm"] #app {
+  /* No AI pane column in calm — collapse the grid */
+  grid-template-columns: var(--rail-w) var(--tree-w) 1fr var(--pdf-w) 0;
+}
+
+/* ── Action bar: collapse to just notes when row selected ───────── */
+body[data-ux-mode="calm"] .action-bar {
+  background: var(--c-bg);
+  border-top: 1px solid var(--c-divider);
+  padding: var(--s-3) var(--s-6);
+  height: auto;
+  min-height: 0;
+  max-height: 56px;
+}
+body[data-ux-mode="calm"] .action-bar .ab-empty-msg { display: none; }
+body[data-ux-mode="calm"] .action-bar .ab-top { display: none; }
+body[data-ux-mode="calm"] .action-bar .ab-bottom { height: auto; }
+body[data-ux-mode="calm"] .action-bar .ab-bottom textarea {
+  background: var(--c-surface-2);
+  border: 0;
+  font-size: 13px;
+  border-radius: var(--r-md);
+  height: 32px; min-height: 32px; max-height: 32px;
+  padding: 6px 12px;
+  color: var(--c-text);
+}
+body[data-ux-mode="calm"] .action-bar .ab-bottom textarea:focus {
+  background: var(--c-surface);
+  outline: 2px solid var(--c-primary-soft);
+}
+
+/* ── Status bar: just the verdict + progress ───────────────────── */
+body[data-ux-mode="calm"] .status-bar {
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-top: 1px solid var(--c-divider);
+  height: auto;
+  padding: var(--s-3) var(--s-6);
+  gap: var(--s-5);
+}
+body[data-ux-mode="calm"] .status-bar .sb-row-info,
+body[data-ux-mode="calm"] .status-bar .sb-claude,
+body[data-ux-mode="calm"] .status-bar .sb-sep,
+body[data-ux-mode="calm"] .status-bar #sb-save-state,
+body[data-ux-mode="calm"] .status-bar .sb-section:has(#sb-save-state) {
+  display: none !important;
+}
+
+/* Verdict pills: BIG, primary action visible */
+body[data-ux-mode="calm"] .status-bar .sb-verdict {
+  background: var(--c-surface-2);
+  padding: 4px;
+  border-radius: var(--r-pill);
+  border: 0;
+  margin: 0 auto;
+}
+body[data-ux-mode="calm"] .sb-vbtn {
+  height: 32px;
+  padding: 6px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--r-pill);
+}
+body[data-ux-mode="calm"] .sb-vbtn .kbd {
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  font-size: 10px;
+  padding: 0;
+  margin-left: 2px;
+}
+body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].pass {
+  background: var(--c-primary); color: white;
+  box-shadow: 0 1px 3px rgba(0,113,227,0.3);
+}
+body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].fail {
+  background: var(--c-danger); color: white;
+  box-shadow: 0 1px 3px rgba(255,59,48,0.3);
+}
+body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].fix {
+  background: var(--c-warn); color: white;
+}
+body[data-ux-mode="calm"] .sb-vbtn[aria-checked="true"].skip {
+  background: var(--c-text-soft); color: white;
+}
+body[data-ux-mode="calm"] .sb-vbtn.reset { color: var(--c-text-faint); }
+body[data-ux-mode="calm"] .sb-progress {
+  font-size: 12px; color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+body[data-ux-mode="calm"] .sb-progress strong { color: var(--c-text); font-weight: 500; }
+body[data-ux-mode="calm"] .sb-progress .bar {
+  width: 60px; height: 3px; border-radius: 2px;
+  background: var(--c-divider);
+}
+body[data-ux-mode="calm"] .sb-progress .bar > span { background: var(--c-primary); }
+
+/* ── Tree: minimal lines, soft hover ───────────────────────────── */
+body[data-ux-mode="calm"] .tree-pane {
+  background: var(--c-bg);
+  border-right: 1px solid var(--c-divider);
+}
+body[data-ux-mode="calm"] .tree {
+  padding: var(--s-3) var(--s-2);
+  background: transparent;
+}
+body[data-ux-mode="calm"] .tree-row {
+  font-size: 13px;
+  padding: 4px 12px;
+  border-radius: var(--r-md);
+  margin-bottom: 1px;
+  border: 0;
+  min-height: 28px;
+  letter-spacing: -0.005em;
+}
+body[data-ux-mode="calm"] .tree-row::before {
+  width: 4px; height: 4px; border-radius: 50%; margin-right: 8px;
+  position: static; display: inline-block; flex-shrink: 0;
+  vertical-align: middle;
+}
+body[data-ux-mode="calm"] .tree-row:hover { background: var(--c-surface-2); }
+body[data-ux-mode="calm"] .tree-row.selected {
+  background: var(--c-primary-soft); color: var(--c-primary-text);
+  font-weight: 500; border: 0;
+}
+body[data-ux-mode="calm"] .tree-row .tree-flags { opacity: 0.6; }
+/* Filter row: smaller, subtler */
+body[data-ux-mode="calm"] .filter-row {
+  padding: 4px 8px;
+  font-size: 12px; color: var(--c-text-muted);
+}
+body[data-ux-mode="calm"] .filter-row select,
+body[data-ux-mode="calm"] .filter-row input[type="search"] {
+  background: var(--c-surface-2); border: 0;
+  font-size: 12px; padding: 4px 8px;
+  border-radius: var(--r-md);
+}
+
+/* ── Center pane: Apple-style large readable type ───────────────── */
+body[data-ux-mode="calm"] .center-pane {
+  background: var(--c-bg);
+  padding: var(--s-7);
+}
+body[data-ux-mode="calm"] .center-pane h1,
+body[data-ux-mode="calm"] .center-pane h2 {
+  font-weight: 600; letter-spacing: -0.02em;
+  color: var(--c-text);
+}
+body[data-ux-mode="calm"] .center-pane .info {
+  color: var(--c-text-soft); font-size: 13px;
+}
+
+/* ── PDF pane: minimal chrome ──────────────────────────────────── */
+body[data-ux-mode="calm"] .pdf-pane {
+  background: var(--c-bg-soft);
+  border-left: 1px solid var(--c-divider);
+}
+body[data-ux-mode="calm"] .pdf-toolbar {
+  opacity: 0.55;
+  transition: opacity 200ms;
+  background: var(--c-bg);
+  border-bottom: 1px solid var(--c-divider);
+}
+body[data-ux-mode="calm"] .pdf-pane:hover .pdf-toolbar { opacity: 1; }
+
+/* ── Buttons: subtle, Apple-style ──────────────────────────────── */
+body[data-ux-mode="calm"] .btn {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border: 0;
+  border-radius: var(--r-md);
+  font-weight: 500;
+  font-size: 13px;
+  padding: 6px 14px;
+  letter-spacing: -0.005em;
+}
+body[data-ux-mode="calm"] .btn:hover { background: var(--c-surface-3); }
+body[data-ux-mode="calm"] .btn-primary {
+  background: var(--c-primary); color: white;
+  box-shadow: 0 1px 2px rgba(0,113,227,0.2);
+}
+body[data-ux-mode="calm"] .btn-primary:hover {
+  background: var(--c-primary-hover);
+}
+
+/* ── Modals: cleaner ───────────────────────────────────────────── */
+body[data-ux-mode="calm"] .modal {
+  border: 0;
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-4), 0 0 0 1px rgba(0,0,0,0.05);
+}
+body[data-ux-mode="calm"] .modal-head {
+  border-bottom: 1px solid var(--c-divider);
+  padding: var(--s-5) var(--s-6);
+}
+body[data-ux-mode="calm"] .modal-head h3 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  font-size: 16px;
+}
+
+/* ── Toast: cleaner ─────────────────────────────────────────────── */
+body[data-ux-mode="calm"] .toast {
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-3);
+  border: 0;
+  background: rgba(28,28,30,0.92);
+  backdrop-filter: blur(20px);
+  color: white;
+}
+body[data-ux-mode="calm"] .toast .ttl { color: white; }
+body[data-ux-mode="calm"] .toast .msg { color: rgba(255,255,255,0.7); }
+
+/* ── Scrollbars: minimal ───────────────────────────────────────── */
+body[data-ux-mode="calm"] *::-webkit-scrollbar { width: 8px; height: 8px; }
+body[data-ux-mode="calm"] *::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.15); border-radius: 4px;
+}
+body[data-ux-mode="calm"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,0.25);
+}
+body[data-ux-mode="calm"] *::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Hide noisy badges/pills sprinkled around ──────────────────── */
+body[data-ux-mode="calm"] .kbd-help { display: none !important; }
+body[data-ux-mode="calm"] .floating-actions { display: none !important; }
+
+/* ── "More" button in topbar (Calm Mode entry to hidden features) ─ */
+.topbar-more-menu {
+  display: none;
+}
+body[data-ux-mode="calm"] .topbar-more-menu {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: 0;
+  color: var(--c-text-soft);
+  padding: 6px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-size: 14px; font-weight: 500;
+}
+body[data-ux-mode="calm"] .topbar-more-menu:hover {
+  background: var(--c-surface-2); color: var(--c-text);
+}
+.topbar-more-popover {
+  position: fixed; z-index: 350;
+  display: none;
+  min-width: 240px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-3);
+  padding: 6px;
+  font-size: 13px;
+}
+.topbar-more-popover.show { display: block; }
+.topbar-more-popover button {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 8px 10px;
+  border: 0; background: transparent;
+  color: var(--c-text);
+  border-radius: var(--r-sm);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.topbar-more-popover button:hover { background: var(--c-surface-2); }
+.topbar-more-popover .group-label {
+  text-transform: uppercase;
+  font-size: 10px; font-weight: 600;
+  color: var(--c-text-faint);
+  letter-spacing: 0.06em;
+  padding: 8px 10px 4px;
+}
+.topbar-more-popover hr {
+  margin: 4px 0; border: 0;
+  border-top: 1px solid var(--c-divider);
+}
+
+/* ── Mode banner (subtle hint that this is Calm; click to switch) ─ */
+.calm-mode-hint {
+  position: fixed;
+  bottom: 14px; left: 14px;
+  z-index: 80;
+  font-size: 11px;
+  color: var(--c-text-faint);
+  background: var(--c-surface);
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--c-divider);
+  box-shadow: var(--e-1);
+  cursor: pointer;
+  display: none;
+  transition: opacity 200ms;
+  opacity: 0.5;
+}
+body[data-ux-mode="calm"] .calm-mode-hint { display: block; }
+.calm-mode-hint:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -3583,6 +4043,12 @@ body[data-embedded="1"] .kbd-help { display: none; }
     </button>
     <div class="topbar-spacer"></div>
     <div class="topbar-actions">
+      <button class="topbar-btn icon-only ucalm-keep" onclick="openCmdK()" title="Command palette (⌘K)" aria-label="open command palette"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg></button>
+      <!-- Calm Mode entry to all hidden features -->
+      <button class="topbar-more-menu ucalm-keep" onclick="toggleTopbarMore(event)" title="เครื่องมือเพิ่มเติม">
+        <svg class="ico ico-sm" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        <span>More</span>
+      </button>
       <button class="topbar-btn" onclick="openCmdK()" title="Command palette (⌘K)" aria-label="open command palette"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><span class="kbd" style="margin-left:4px">⌘K</span></button>
       <span class="stats-pill" id="stats-pill" role="status" aria-label="overall progress">
         <span id="stats-pill-progress">—</span>
@@ -4489,6 +4955,38 @@ body[data-embedded="1"] .kbd-help { display: none; }
 
 <!-- ──────────── Phase 2: Catalog browser modal ──────────── -->
 <!-- (already moved above? — keep below toast div) -->
+
+<!-- Calm Mode "More" popover (advanced features hidden from main UI) -->
+<div class="topbar-more-popover" id="topbar-more-popover" role="menu" aria-label="more tools">
+  <div class="group-label">Library</div>
+  <button onclick="closeTopbarMore();openCatalogBrowser()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>Catalog Library</span></button>
+  <button onclick="closeTopbarMore();openExportModal()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg><span>Export PDF</span></button>
+  <hr>
+  <div class="group-label">Project</div>
+  <button onclick="closeTopbarMore();openProjectSwitcher()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg><span>Switch project</span></button>
+  <button onclick="closeTopbarMore();openContinuityModal()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg><span>Continuity state</span></button>
+  <button onclick="closeTopbarMore();showVersions()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Versions / snapshots</span></button>
+  <hr>
+  <div class="group-label">Tools</div>
+  <button onclick="closeTopbarMore();showLearning()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-brain"/></svg><span>Learning patterns</span></button>
+  <button onclick="closeTopbarMore();showAudit()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-chart"/></svg><span>Database &amp; audit</span></button>
+  <button onclick="closeTopbarMore();toggleAiPane()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Toggle AI pane</span></button>
+  <hr>
+  <div class="group-label">App</div>
+  <button onclick="closeTopbarMore();showSettings()"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
+  <button onclick="closeTopbarMore();window.open('/manual','_blank')"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>คู่มือ (Manual)</span></button>
+  <button onclick="closeTopbarMore();showOnboarding(true)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-help"/></svg><span>Help &amp; shortcuts</span></button>
+  <hr>
+  <button onclick="closeTopbarMore();toggleUxMode()" id="ucalm-toggle">
+    <svg class="ico ico-sm" aria-hidden="true"><use href="#i-eye"/></svg>
+    <span>Show all controls (Pro mode)</span>
+  </button>
+</div>
+
+<!-- Calm Mode hint (bottom-left) -->
+<div class="calm-mode-hint" onclick="toggleUxMode()" title="กลับเป็น Pro mode (เห็นเครื่องมือทั้งหมด)">
+  Calm Mode · click for Pro
+</div>
 
 <!-- Toast notifications (top-right) -->
 <div id="toasts" class="toast-stack" role="region" aria-live="polite" aria-label="notifications"></div>
@@ -9297,6 +9795,74 @@ if (localStorage.getItem('comply-show-kbd') === '0') {
 // When the app runs inside an iframe (Claude Preview, embedded view,
 // etc.), there's typically a host toolbar overlapping the top ~48px.
 // We carve out --safe-top space so the topbar isn't covered.
+// ── Calm Mode (UX redesign 2026-05-10) ───────────────────────────
+// Default to "calm" — only essential UI visible, Apple/Tesla aesthetic.
+// User toggles to "pro" via topbar ⌄ More → "Show all controls".
+(function applyUxMode() {
+  let mode;
+  try {
+    mode = localStorage.getItem('comply-ux-mode');
+  } catch (e) {}
+  if (mode !== 'pro' && mode !== 'calm') mode = 'calm';   // default = calm
+  document.body.setAttribute('data-ux-mode', mode);
+})();
+function toggleUxMode() {
+  const cur = document.body.getAttribute('data-ux-mode') || 'calm';
+  const next = cur === 'calm' ? 'pro' : 'calm';
+  document.body.setAttribute('data-ux-mode', next);
+  try { localStorage.setItem('comply-ux-mode', next); } catch (e) {}
+  const lbl = next === 'calm' ? 'Calm mode (only essentials)' : 'Pro mode (all controls)';
+  if (typeof toast === 'function') {
+    toast('UI mode', lbl, 'info', 2500);
+  }
+  // Update toggle label in More popover
+  const t = document.getElementById('ucalm-toggle');
+  if (t) {
+    const span = t.querySelector('span');
+    if (span) span.textContent = next === 'calm'
+      ? 'Show all controls (Pro mode)'
+      : 'Hide noise (Calm mode)';
+  }
+}
+function toggleTopbarMore(e) {
+  if (e) e.stopPropagation();
+  const pop = document.getElementById('topbar-more-popover');
+  const btn = document.querySelector('.topbar-more-menu');
+  if (!pop || !btn) return;
+  if (pop.classList.contains('show')) { closeTopbarMore(); return; }
+  const r = btn.getBoundingClientRect();
+  pop.classList.add('show');
+  // Right-align with the button, just below
+  const w = pop.offsetWidth || 240;
+  let left = r.right - w;
+  if (left < 8) left = 8;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  let top = r.bottom + 6;
+  if (top + pop.offsetHeight > window.innerHeight - 8) {
+    top = r.top - pop.offsetHeight - 6;
+  }
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  setTimeout(() => {
+    document.addEventListener('click', _closeTopbarMoreOnOutside, true);
+    document.addEventListener('keydown', _closeTopbarMoreOnEsc, true);
+  }, 0);
+}
+function closeTopbarMore() {
+  const pop = document.getElementById('topbar-more-popover');
+  if (pop) pop.classList.remove('show');
+  document.removeEventListener('click', _closeTopbarMoreOnOutside, true);
+  document.removeEventListener('keydown', _closeTopbarMoreOnEsc, true);
+}
+function _closeTopbarMoreOnOutside(e) {
+  const pop = document.getElementById('topbar-more-popover');
+  const btn = document.querySelector('.topbar-more-menu');
+  if (pop && pop.contains(e.target)) return;
+  if (btn && btn.contains(e.target)) return;
+  closeTopbarMore();
+}
+function _closeTopbarMoreOnEsc(e) { if (e.key === 'Escape') closeTopbarMore(); }
+
 (function applyEmbeddedMode() {
   let embedded;
   const explicit = localStorage.getItem('comply-embedded');

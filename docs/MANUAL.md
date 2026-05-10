@@ -153,6 +153,61 @@ Browser เปิดอัตโนมัติที่ <http://127.0.0.1:5173>
 
 ---
 
+## บทที่ 2.5 — Calm Mode vs Pro Mode
+
+ระบบมี 2 โหมด UI — **Calm Mode** เป็น default (เห็นเฉพาะที่ใช้บ่อย),
+**Pro Mode** เห็นเครื่องมือทั้งหมด
+
+### Calm Mode (default)
+
+ออกแบบสไตล์ Apple + Tesla — minimalism + พื้นที่หายใจ:
+
+- หน้าจอเหลือ 4 ส่วน: Tree (ซ้าย) · Center (TOR + xlsx) · PDF (ขวา) · Status bar (ล่าง)
+- Activity rail ซ่อนหมดยกเว้น Tree
+- Ribbon mode tabs ซ่อน
+- AI pane ซ่อน (เปิดได้จาก More menu)
+- Action bar เหลือแค่ notes textarea
+- Status bar เหลือ verdict pills + progress
+- Topbar slim, frosted, blur background
+- Apple blue `#0071e3` เป็น accent เดียว
+- SF Pro typography
+- Generous whitespace
+
+### Pro Mode
+
+เห็น UI เดิมทั้งหมด — ใช้เมื่อต้องการ:
+- AI pane พร้อม proposal/teach-back/Run with Claude
+- Activity rail ครบทุก icon
+- Ribbon mode tabs
+- Action bar Auto/Mark/auto-next
+- Status bar Claude badge + saved indicator
+- ทุก topbar pill (project switcher, continuity, theme toggle, ฯลฯ)
+
+### สลับโหมด
+
+3 ทาง:
+
+1. **More menu** (▾ ใน topbar) → "Show all controls (Pro mode)" / "Hide noise (Calm mode)"
+2. **Calm Mode hint** (มุมล่างซ้าย, สีเทาจางๆ) → คลิกเพื่อสลับ
+3. **Console**: `localStorage.setItem('comply-ux-mode', 'pro')` แล้ว reload
+
+### เมื่อไหร่ใช้โหมดไหน
+
+| Workflow | Mode แนะนำ |
+|---|---|
+| User-proof rapid (J/K + 1-4) | **Calm** |
+| ตรวจ catalog + แก้ annotations | **Calm** (Catalog เปิดผ่าน More menu) |
+| ดู AI live stream (Run with Claude) | **Pro** (เห็น AI pane เต็มจอ) |
+| Teach Claude, ดู learned patterns | **Pro** |
+| Re-annotate wizard + advanced edit | **Pro** (เห็น ribbon mode tabs) |
+| Multi-company switching | **Calm** (Switch project ผ่าน More menu) |
+| Export PDF + tools occasional | **Calm** (More menu) |
+
+**ความแตกต่างใน "More menu"**: Calm Mode ใช้ More menu (▾) ในมุม topbar เพื่อเข้าถึงฟีเจอร์ที่ซ่อนไว้.
+Pro Mode ใช้ Activity rail (icon ฝั่งซ้าย) แทน
+
+---
+
 ## บทที่ 3 — รู้จักหน้าจอ
 
 ระบบใช้ **Acrobat-style layout** แบ่งเป็น 6 surface หลัก:

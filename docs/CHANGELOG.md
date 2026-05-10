@@ -1660,3 +1660,108 @@ All checks passed!
 | Continuity producer | Skill Agent only | **GUI also writes** STATE |
 | Catalog cleanup tools | manual SQL | bulk preview + apply UI |
 | Filter "what's left" | none | "🔴 ต้องดู" toggle |
+
+---
+
+## Calm Mode — Apple + Tesla minimalism (default UI redesign)
+
+**Trigger**: user — *"ออกแบบ UXUI ของระบบใหม่ทั้งหมด ให้เหลือแค่
+เท่าที่ USER ต้องใช้จริงๆ เพราะตอนนี้รู้สึกว่าข้อมูลเยอะไปหมด ไม่
+user friendly แล้วเปลี่ยน theme ui ให้ minimal คล้าย Tesla + Apple"*.
+
+The system grew over many sprints — by the audit point it had:
+- 8-icon activity rail
+- 4 ribbon mode tabs
+- 4 topbar pills + 5 buttons
+- 5-section AI pane
+- Multiple modals + menus + toasts
+- Status bar with row info + verdict + progress + Claude badge + save state
+
+Too much. The user-proof loop is **pick → see → decide → next** — 4
+steps. Everything else is occasional.
+
+### Design philosophy
+
+- **Apple HIG palette**: `#0071e3` blue accent, `#1d1d1f` text,
+  `#f5f5f7` surface-2, `#e5e5ea` divider. White background dominant.
+- **SF Pro font stack** with `-0.005em` letter-spacing,
+  `font-feature-settings: ss01, cv11`.
+- **Tesla chrome**: frosted topbar with `backdrop-filter: blur(20px)`,
+  thin 1px dividers (no heavy borders), shadow only on the primary
+  pass button.
+- **One primary action visible**: the active verdict pill is filled,
+  others are subtle pills in a segmented control.
+- **Generous spacing**: status bar / action bar use `s-6` (20px)
+  padding, tree rows 4-12px.
+- **Subtle scrollbars**: 8px, semi-transparent on hover only.
+
+### What's hidden in Calm Mode
+
+| Feature | Where it goes |
+|---|---|
+| Activity rail icons (catalog/export/learn/versions/audit/AI/theme/help) | "▾ More" menu in topbar |
+| Ribbon mode tabs (Verify/Edit/Re-annotate/Apply Auto) | hidden — use Edit toggle in PDF pane |
+| AI pane (proposal + Run Claude + teach + recent) | toggle via More menu |
+| Action bar: Auto / Mark / auto-next | hidden — use right-click Col D menu instead |
+| Status bar: Claude badge, save state, row info detail | hidden |
+| Topbar: project pill, continuity pill, theme toggle, stats pill | hidden — find in More menu |
+| kbd-help, FAB cluster | hidden |
+
+### What's still visible
+
+```
+┌──────────────────────────────────────────────────────┐
+│   Comply · Smart Plant 1            ⌘  ▾ More       │  ← slim topbar
+├────┬───────────────────────────────────┬────────────┤
+│    │                                   │            │
+│Tree│           Center                  │    PDF     │  ← 3-pane minimal
+│    │           (TOR + xlsx)            │            │
+│    │                                   │            │
+└────┴───────────────────────────────────┴────────────┤
+│  [Notes textarea]                                    │  ← action bar (notes only)
+├──────────────────────────────────────────────────────┤
+│  [✓ผ่าน 1] [✗ไม่ผ่าน 2] [⚠แก้ 3] [⏭ข้าม 4]   65/660 │  ← status bar (verdict+progress)
+└──────────────────────────────────────────────────────┘
+                                          Calm Mode · click
+```
+
+### Implementation
+
+- Single CSS block scoped under `body[data-ux-mode="calm"]`
+  (~520 lines of overrides, 88 selectors)
+- IIFE at boot reads `localStorage["comply-ux-mode"]`,
+  defaults to `"calm"` if unset
+- `toggleUxMode()` flips between `calm ↔ pro`, persists, toasts
+- New "▾ More" button in topbar (`.topbar-more-menu`) opens
+  popover with grouped entries:
+  - **Library**: Catalog Library, Export PDF
+  - **Project**: Switch project, Continuity state, Versions
+  - **Tools**: Learning patterns, Database & audit, Toggle AI pane
+  - **App**: Settings, Manual, Help & shortcuts
+  - **Toggle**: Show all controls (Pro mode) ↔ Hide noise (Calm mode)
+- Bottom-left "Calm Mode · click for Pro" hint pill
+- All Calm Mode CSS is opt-in via `body[data-ux-mode="calm"]`
+  selector — Pro mode is the existing styling, untouched
+- Dark mode auto-detected via `prefers-color-scheme: dark`
+
+### Verification
+
+- 36/36 smoke tests pass (was 35; +1 for Calm Mode hooks)
+- `ruff check`: All checks passed
+- All 65 routes still resolve
+- HTML still serves all UI elements (toggle just hides them via CSS)
+- Pro Mode still functional for users who prefer the old layout
+
+### Lessons captured
+
+- **Hide, don't delete**: every advanced feature lives in the More
+  menu. Power users keep access; casual users get a clean slate.
+- **One palette, one accent**: Tesla's red and Apple's blue are
+  both single-accent systems. Picking one (Apple blue) and using
+  it ONLY on the primary action keeps the eye on what matters.
+- **Frosted topbar > opaque**: `backdrop-filter: blur(20px)` on a
+  semi-transparent white gives that "iOS native" feel without any
+  3rd-party libs.
+- **Calm Mode default + opt-out > Pro default + opt-in**: most
+  users never change defaults. Setting the bar at "minimal" by
+  default ships the redesign to everyone immediately.
