@@ -4895,6 +4895,11 @@ INDEX_HTML = r"""<!doctype html>
 
   /* Layout */
   --topbar-h:    52px;
+  --ribbon-h:    52px;             /* mode-tabs + sub-toolbar */
+  --statusbar-h: 30px;             /* bottom status strip */
+  --rail-w:      48px;             /* left activity rail (icon-only) */
+  --rail-panel-w: 280px;           /* expanded panel that slides next to rail */
+  --ai-w:        340px;            /* right AI pane */
   --pane-head-h: 40px;
   --toolbar-h:   40px;            /* unified canvas/edit toolbar height */
   --action-bar-h: 76px;            /* fixed; tall enough for verdict + notes */
@@ -5108,35 +5113,435 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   .skel { animation: none; background: var(--c-surface-2); }
 }
 
-/* ── App shell ──────────────────────────────────────────────────── */
-/* The --safe-top variable absorbs any host-app/browser-extension chrome
-   that overlays the top of the viewport (Claude Preview MCP toolbar,
-   browser translate bars, etc.). Default 0 for normal browser use; auto
-   bumped to 56px when running inside an iframe (data-embedded), user
-   can override exactly via Settings → "Top inset" slider (sets an
-   inline style on body which beats this rule). */
+/* ── App shell ─────────────────────────────────────────────────────
+   Acrobat-style layout — 5 rows × 5 cols:
+     safetop : host-app overlay clearance (Claude Preview, etc.)
+     topbar  : brand + breadcrumb + cmdK
+     ribbon  : mode tabs + sub-toolbar (Verify / Edit / Re-annotate / Apply)
+     content : LEFT-RAIL · TREE · CENTER · PDF · AI-PANE
+     status  : current row · verdict · progress · Claude online · save state
+*/
 :root { --safe-top: 0px; }
 body[data-embedded="1"] { --safe-top: 56px; }
 
 #app {
   display: grid;
-  grid-template-rows: var(--safe-top) var(--topbar-h) 1fr auto;
-  grid-template-columns: minmax(var(--tree-w-md), var(--tree-w)) 1fr 1fr;
+  grid-template-rows:
+    var(--safe-top)
+    var(--topbar-h)
+    var(--ribbon-h)
+    1fr
+    auto                    /* action bar (legacy, will fold into status bar) */
+    var(--statusbar-h);
+  grid-template-columns:
+    var(--rail-w)
+    minmax(var(--tree-w-md), var(--tree-w))
+    1fr
+    1fr
+    var(--ai-w);
   grid-template-areas:
-    "safetop safetop safetop"
-    "topbar  topbar  topbar"
-    "tree    center  pdf"
-    "action  action  action";
+    "safetop safetop safetop safetop safetop"
+    "topbar  topbar  topbar  topbar  topbar"
+    "ribbon  ribbon  ribbon  ribbon  ribbon"
+    "rail    tree    center  pdf     ai"
+    "rail    action  action  action  ai"
+    "status  status  status  status  status";
   height: 100vh;
   background: var(--c-bg);
 }
 #app::before {
   content: '';
   grid-area: safetop;
-  background: var(--c-bg);    /* match app bg so the gap is invisible */
+  background: var(--c-bg);
 }
-#app > .action-bar { grid-area: action; }
+#app > .action-bar  { grid-area: action; }
+#app > .activity-rail { grid-area: rail; }
+#app > .context-ribbon { grid-area: ribbon; }
+#app > .ai-pane     { grid-area: ai; }
+#app > .status-bar  { grid-area: status; }
+
+/* When the AI pane is collapsed, shrink that column to 0 */
+body[data-ai-pane="0"] #app { grid-template-columns:
+  var(--rail-w) minmax(var(--tree-w-md), var(--tree-w)) 1fr 1fr 0; }
+body[data-ai-pane="0"] .ai-pane { display: none; }
+
+/* When the rail-panel is showing instead of the tree, swap tree out */
+body[data-rail-panel] .tree-pane { display: none; }
+body[data-rail-panel] #app { grid-template-columns:
+  var(--rail-w) var(--rail-panel-w) 1fr 1fr var(--ai-w); }
+body[data-rail-panel="0"] .tree-pane { display: flex; }
+
 #app.has-sync-banner { padding-top: 32px; }
+
+/* ── Activity Rail (left, icon-only) ─────────────────────────────
+   Persistent vertical rail with icons. Click an icon to expand a
+   panel beside the rail (overlays/replaces the tree pane on small
+   screens, sits beside it on large ones). Click again to collapse. */
+.activity-rail {
+  display: flex; flex-direction: column;
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  padding: var(--s-3) 0;
+  gap: 2px;
+  overflow-y: auto;
+}
+.activity-rail .rail-btn {
+  width: var(--rail-w); height: var(--rail-w);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  position: relative;
+  border-radius: 0;
+  transition: color var(--d-fast) var(--ease-std), background var(--d-fast) var(--ease-std);
+}
+.activity-rail .rail-btn:hover { color: var(--c-text); background: var(--c-surface-2); }
+.activity-rail .rail-btn .ico { width: 20px; height: 20px; }
+.activity-rail .rail-btn.active {
+  color: var(--c-primary);
+  background: var(--c-primary-soft);
+}
+.activity-rail .rail-btn.active::before {
+  content: ''; position: absolute;
+  left: 0; top: 8px; bottom: 8px; width: 3px;
+  background: var(--c-primary);
+  border-radius: 0 2px 2px 0;
+}
+.activity-rail .rail-spacer { flex: 1; }
+.activity-rail .rail-sep {
+  margin: var(--s-3) auto;
+  width: 24px; height: 1px;
+  background: var(--c-border);
+}
+
+/* Rail panel (slides in beside rail, replaces the tree pane area) */
+.rail-panel {
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+}
+body[data-rail-panel] .rail-panel { display: flex; grid-area: tree; }
+.rail-panel-head {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-5);
+  height: var(--pane-head-h);
+  border-bottom: 1px solid var(--c-border);
+  font-size: var(--t-base); font-weight: 600;
+  color: var(--c-text);
+}
+.rail-panel-head .panel-title { flex: 1; }
+.rail-panel-head .panel-close {
+  background: transparent; border: 0;
+  color: var(--c-text-soft);
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.rail-panel-head .panel-close:hover { background: var(--c-surface-2); color: var(--c-text); }
+.rail-panel-body {
+  flex: 1; overflow: auto;
+  padding: var(--s-5);
+  font-size: var(--t-sm);
+}
+
+/* ── Context Ribbon (mode tabs + sub-toolbar) ───────────────────── */
+.context-ribbon {
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  display: flex; flex-direction: column;
+  z-index: 8;
+}
+.ribbon-tabs {
+  display: flex; gap: 2px;
+  padding: 6px var(--s-7) 0 var(--s-7);
+  background: var(--c-surface);
+  height: 32px;
+  align-items: center;
+}
+.ribbon-tab {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  padding: 4px var(--s-5);
+  height: 26px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--c-text-muted);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  font-size: var(--t-sm); font-weight: 600;
+  cursor: pointer;
+  position: relative; top: 1px;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.ribbon-tab:hover { color: var(--c-text); background: var(--c-surface-2); }
+.ribbon-tab.active {
+  color: var(--c-primary-text);
+  background: var(--c-surface);
+  border-color: var(--c-border);
+  border-bottom-color: var(--c-surface);
+  z-index: 2;
+}
+.ribbon-tab .ico { width: 14px; height: 14px; }
+
+.ribbon-subtoolbar {
+  flex: 1;
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-7);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--t-sm);
+  background: var(--c-surface);
+  min-height: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ribbon-subtoolbar::-webkit-scrollbar { display: none; }
+.ribbon-subtoolbar > * { flex-shrink: 0; }
+.ribbon-subtoolbar .rb-group { display: inline-flex; gap: 2px; align-items: center; }
+.ribbon-subtoolbar .rb-sep {
+  width: 1px; height: 18px;
+  background: var(--c-border);
+  margin: 0 var(--s-3);
+}
+.ribbon-subtoolbar .rb-spacer { flex: 1; }
+.ribbon-subtoolbar button {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  height: 28px; padding: 0 var(--s-4);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--c-text-muted);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.ribbon-subtoolbar button:hover { background: var(--c-surface-2); color: var(--c-text); }
+.ribbon-subtoolbar button.active { background: var(--c-warn); color: white; }
+.ribbon-subtoolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.ribbon-subtoolbar label {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-size: var(--t-sm); color: var(--c-text-muted);
+  cursor: pointer;
+}
+.ribbon-subtoolbar .rb-info {
+  font-size: var(--t-sm); color: var(--c-text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Show only the active mode's sub-toolbar */
+.ribbon-mode-bar { display: none; flex: 1; align-items: center; gap: var(--s-3); padding: 0 var(--s-7); }
+body[data-mode="verify"] .ribbon-mode-bar.mode-verify { display: flex; }
+body[data-mode="edit"] .ribbon-mode-bar.mode-edit { display: flex; }
+body[data-mode="reannotate"] .ribbon-mode-bar.mode-reannotate { display: flex; }
+body[data-mode="apply"] .ribbon-mode-bar.mode-apply { display: flex; }
+
+/* ── AI Pane (right, collapsible) ──────────────────────────────── */
+.ai-pane {
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+.ai-pane-head {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-5);
+  height: var(--pane-head-h);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+}
+.ai-pane-head .ai-title {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+  font-size: var(--t-sm);
+}
+.ai-pane-head .ai-title .name { font-weight: 700; color: var(--c-text); }
+.ai-pane-head .ai-title .sub  { font-size: var(--t-xs); color: var(--c-text-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-pane-head .ai-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--c-text-faint);
+  flex-shrink: 0;
+}
+.ai-pane-head[data-status="online"] .ai-status-dot { background: var(--c-success); animation: ai-pulse 2s ease-in-out infinite; }
+.ai-pane-head[data-status="offline"] .ai-status-dot { background: var(--c-danger); }
+@keyframes ai-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+  50%      { box-shadow: 0 0 0 4px rgba(16,185,129,0); }
+}
+.ai-pane-head .ai-collapse {
+  background: transparent; border: 0;
+  color: var(--c-text-soft);
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.ai-pane-head .ai-collapse:hover { background: var(--c-surface-2); color: var(--c-text); }
+
+.ai-pane-body {
+  flex: 1; overflow-y: auto;
+  padding: var(--s-5);
+  display: flex; flex-direction: column; gap: var(--s-5);
+}
+
+.ai-section {
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: var(--s-4) var(--s-5);
+}
+.ai-section h4 {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-xs); font-weight: 700;
+  color: var(--c-text-faint);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  display: flex; align-items: center; gap: var(--s-2);
+}
+.ai-section h4 .ico { color: var(--c-text-soft); width: 14px; height: 14px; }
+
+/* AI Proposal block */
+.ai-proposal-text {
+  font-size: var(--t-base); color: var(--c-text);
+  background: var(--c-surface); padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--c-border); border-radius: var(--r-sm);
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--f-mono); font-size: var(--t-sm);
+  margin-bottom: var(--s-3);
+}
+.ai-conf-bar {
+  height: 6px; border-radius: 3px; background: var(--c-surface-3);
+  overflow: hidden; margin-bottom: var(--s-2);
+}
+.ai-conf-bar > span { display: block; height: 100%; background: var(--c-success); transition: width 0.3s; }
+.ai-conf-bar.med > span  { background: var(--c-warn); }
+.ai-conf-bar.low > span  { background: var(--c-danger); }
+.ai-conf-text {
+  display: flex; justify-content: space-between;
+  font-size: var(--t-xs); color: var(--c-text-soft);
+  margin-bottom: var(--s-3);
+}
+.ai-rationale {
+  font-size: var(--t-xs); color: var(--c-text-muted);
+  font-style: italic;
+  border-left: 2px solid var(--c-info);
+  padding: 2px var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.ai-actions {
+  display: flex; gap: var(--s-2);
+}
+.ai-actions button {
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--c-border-strong);
+  background: var(--c-surface);
+  color: var(--c-text);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 600;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
+  transition: all var(--d-fast) var(--ease-std);
+}
+.ai-actions button.ai-accept { background: var(--c-success); color: white; border-color: var(--c-success); }
+.ai-actions button.ai-accept:hover { background: var(--c-success-hover); }
+.ai-actions button.ai-edit:hover { background: var(--c-surface-2); border-color: var(--c-primary); color: var(--c-primary-text); }
+.ai-actions button.ai-reject:hover { background: var(--c-danger-soft); border-color: var(--c-danger); color: var(--c-danger-text); }
+
+/* Teach-back textarea */
+.ai-teach textarea {
+  width: 100%; min-height: 64px; resize: vertical;
+  font: inherit; font-size: var(--t-sm);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  margin-bottom: var(--s-3);
+}
+.ai-teach .ai-tags {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-bottom: var(--s-3);
+}
+.ai-teach .ai-tag {
+  font-size: var(--t-xs);
+  padding: 2px var(--s-3);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-family: var(--f-mono);
+  user-select: none;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.ai-teach .ai-tag:hover { background: var(--c-info-soft); border-color: var(--c-info); color: var(--c-info-text); }
+.ai-teach .ai-tag.active { background: var(--c-info); color: white; border-color: var(--c-info); }
+.ai-teach button.ai-send {
+  height: 28px; padding: 0 var(--s-5);
+  background: var(--c-primary); color: white; border: 0;
+  border-radius: var(--r-md);
+  font-size: var(--t-sm); font-weight: 600;
+  cursor: pointer;
+}
+.ai-teach button.ai-send:hover { background: var(--c-primary-hover); }
+
+.ai-empty {
+  text-align: center;
+  padding: var(--s-7) var(--s-4);
+  color: var(--c-text-faint);
+  font-size: var(--t-sm);
+}
+
+/* ── Status Bar (bottom) ──────────────────────────────────────── */
+.status-bar {
+  display: flex; align-items: center; gap: var(--s-5);
+  padding: 0 var(--s-5);
+  height: var(--statusbar-h);
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--t-xs);
+  color: var(--c-text-muted);
+}
+.status-bar .sb-section {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  white-space: nowrap;
+}
+.status-bar .sb-spacer { flex: 1; }
+.status-bar .sb-sep { width: 1px; height: 16px; background: var(--c-border); }
+.status-bar strong { color: var(--c-text); font-weight: 700; }
+.status-bar .sb-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px var(--s-3);
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 600;
+}
+.status-bar .sb-pill.pass     { background: var(--c-success-soft); color: var(--c-success-text); }
+.status-bar .sb-pill.fail     { background: var(--c-danger-soft); color: var(--c-danger-text); }
+.status-bar .sb-pill.need_fix { background: var(--c-warn-soft); color: var(--c-warn-text); }
+.status-bar .sb-pill.skip     { background: var(--c-surface-3); color: var(--c-text-soft); }
+.status-bar .sb-progress {
+  display: inline-flex; align-items: center; gap: var(--s-3);
+  font-variant-numeric: tabular-nums;
+}
+.status-bar .sb-progress .bar {
+  width: 80px; height: 4px; border-radius: 2px;
+  background: var(--c-surface-3); overflow: hidden;
+}
+.status-bar .sb-progress .bar > span {
+  display: block; height: 100%;
+  background: var(--c-primary);
+  transition: width 0.3s var(--ease-out);
+}
+.status-bar .sb-claude {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+}
+.status-bar .sb-claude .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--c-text-faint);
+}
+.status-bar .sb-claude.online .dot { background: var(--c-success); }
+.status-bar .sb-claude.offline .dot { background: var(--c-text-faint); }
 
 .topbar {
   grid-area: topbar;
@@ -7372,6 +7777,131 @@ select { cursor: pointer; }
     <button              data-tab="center" onclick="setMobileTab('center')" role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg><span>TOR/xlsx</span></button>
     <button              data-tab="pdf"    onclick="setMobileTab('pdf')"    role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg><span>Catalog</span></button>
   </nav>
+
+  <!-- ───── LEFT: Activity Rail ─────────────────────────────────── -->
+  <aside class="activity-rail" role="navigation" aria-label="primary navigation">
+    <button class="rail-btn active" data-panel="tree" onclick="setRailPanel('tree')" title="Row tree" aria-label="row tree"><svg class="ico" aria-hidden="true"><use href="#i-folder"/></svg></button>
+    <button class="rail-btn" data-panel="search" onclick="openCmdK()" title="Search · ⌘K" aria-label="search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg></button>
+    <button class="rail-btn" data-panel="learn" onclick="setRailPanel('learn')" title="Learning patterns" aria-label="learn"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg></button>
+    <button class="rail-btn" data-panel="versions" onclick="setRailPanel('versions')" title="Project versions" aria-label="versions"><svg class="ico" aria-hidden="true"><use href="#i-package"/></svg></button>
+    <button class="rail-btn" data-panel="audit" onclick="setRailPanel('audit')" title="Database & audit" aria-label="audit"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg></button>
+    <span class="rail-spacer"></span>
+    <button class="rail-btn" onclick="toggleAiPane()" title="Toggle AI pane" aria-label="AI pane"><svg class="ico" aria-hidden="true"><use href="#i-sparkles"/></svg></button>
+    <span class="rail-sep"></span>
+    <button class="rail-btn" onclick="toggleTheme()" title="Toggle theme" aria-label="theme" id="rail-theme"><svg class="ico" aria-hidden="true"><use href="#i-moon"/></svg></button>
+    <button class="rail-btn" onclick="showSettings()" title="Settings" aria-label="settings"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg></button>
+    <button class="rail-btn" onclick="showOnboarding(true)" title="Help · ?" aria-label="help"><svg class="ico" aria-hidden="true"><use href="#i-help"/></svg></button>
+  </aside>
+
+  <!-- Rail panel host — content swaps based on data-rail-panel -->
+  <div class="rail-panel" role="region" aria-label="rail panel">
+    <div class="rail-panel-head">
+      <span class="panel-title" id="rail-panel-title">Panel</span>
+      <button class="panel-close" onclick="setRailPanel('tree')" aria-label="close"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="rail-panel-body" id="rail-panel-body"></div>
+  </div>
+
+  <!-- ───── Context Ribbon (mode tabs + sub-toolbar) ─────────────── -->
+  <div class="context-ribbon" role="toolbar" aria-label="mode and tools">
+    <div class="ribbon-tabs" role="tablist" aria-label="modes">
+      <button class="ribbon-tab active" data-mode="verify" onclick="setMode('verify')" role="tab" aria-selected="true"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-eye"/></svg><span>Verify</span></button>
+      <button class="ribbon-tab" data-mode="edit" onclick="setMode('edit')" role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-pencil"/></svg><span>Edit</span></button>
+      <button class="ribbon-tab" data-mode="reannotate" onclick="setMode('reannotate')" role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Re-annotate</span></button>
+      <button class="ribbon-tab" data-mode="apply" onclick="setMode('apply')" role="tab" aria-selected="false"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Apply Auto</span></button>
+    </div>
+    <!-- Verify mode: navigation + highlight + DPI -->
+    <div class="ribbon-mode-bar mode-verify">
+      <div class="rb-group">
+        <button onclick="pdfPrev()" title="Catalog page prev · [" aria-label="prev page"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
+        <span class="rb-info" id="ribbon-pdf-page">— / —</span>
+        <button onclick="pdfNext()" title="Catalog page next · ]" aria-label="next page"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+      </div>
+      <div class="rb-sep"></div>
+      <div class="rb-group">
+        <button onclick="pdfZoom(-1)" title="Zoom out" aria-label="zoom out"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-minus"/></svg></button>
+        <button onclick="pdfZoom(1)" title="Zoom in" aria-label="zoom in"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="rb-sep"></div>
+      <label title="Highlight matched text"><input type="checkbox" id="ribbon-hl-toggle" checked onchange="renderPdf()"> Highlight</label>
+      <span class="rb-spacer"></span>
+      <span class="rb-info">บริบท ±<span id="ribbon-ctx-radius">6</span> rows</span>
+      <div class="rb-group">
+        <button onclick="ctxRadius(-2)" title="Reduce context">−2</button>
+        <button onclick="ctxRadius(2)"  title="More context">+2</button>
+      </div>
+    </div>
+    <!-- Edit mode: tools -->
+    <div class="ribbon-mode-bar mode-edit">
+      <div class="rb-group">
+        <button class="active" data-tool="select" onclick="setTool('select')" title="Select / move · V"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-cursor"/></svg></button>
+        <button data-tool="drawRect" onclick="setTool('drawRect')" title="Draw rect · R"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-square"/></svg></button>
+        <button data-tool="addText" onclick="setTool('addText')" title="Add text · T"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-text"/></svg></button>
+        <button onclick="deleteSelected()" title="Delete selected · Del"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div>
+      <div class="rb-sep"></div>
+      <div class="rb-group">
+        <button id="ribbon-undo-btn" onclick="undo()" disabled title="Undo · ⌘Z"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-undo"/></svg></button>
+        <button id="ribbon-redo-btn" onclick="redo()" disabled title="Redo · ⇧⌘Z"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-redo"/></svg></button>
+      </div>
+      <div class="rb-sep"></div>
+      <button onclick="showHistory()" title="Catalog edit history"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></button>
+      <span class="rb-spacer"></span>
+      <span class="rb-info" id="ribbon-dirty-ind"></span>
+      <button id="ribbon-save-btn" onclick="saveEdits()" disabled title="Save · ⌘S" style="background:var(--c-success);color:white;border-color:var(--c-success);font-weight:600"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save</span></button>
+    </div>
+    <!-- Re-annotate mode: starts wizard if not already in it -->
+    <div class="ribbon-mode-bar mode-reannotate">
+      <span class="rb-info">Re-annotate the selected row's catalog. Click <strong>Start</strong> to launch the wizard.</span>
+      <span class="rb-spacer"></span>
+      <button onclick="startReannotate()" title="Start wizard"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Start wizard</span></button>
+    </div>
+    <!-- Apply Auto mode: AI proposal control -->
+    <div class="ribbon-mode-bar mode-apply">
+      <span class="rb-info" id="ribbon-llm-summary">Claude · checking…</span>
+      <span class="rb-spacer"></span>
+      <button onclick="showAutoAnnotate()" title="Preview AI proposal"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-sparkles"/></svg><span>Preview proposal</span></button>
+      <button onclick="aiPaneRefresh()" title="Refresh AI pane"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+    </div>
+  </div>
+
+  <!-- ───── RIGHT: AI Pane ──────────────────────────────────────── -->
+  <aside class="ai-pane" id="ai-pane" role="complementary" aria-label="AI assistant">
+    <div class="ai-pane-head" id="ai-pane-head" data-status="offline">
+      <span class="ai-status-dot"></span>
+      <div class="ai-title">
+        <span class="name">Claude</span>
+        <span class="sub" id="ai-pane-sub">offline · paste API key in Settings</span>
+      </div>
+      <button class="ai-collapse" onclick="toggleAiPane()" title="Hide AI pane" aria-label="hide AI pane"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ai-pane-body" id="ai-pane-body">
+      <div class="ai-empty">
+        <svg class="ico ico-xl" aria-hidden="true" style="opacity:0.3;margin-bottom:var(--s-3)"><use href="#i-sparkles"/></svg>
+        <div>เลือก row เพื่อเริ่ม</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ───── BOTTOM: Status Bar ──────────────────────────────────── -->
+  <footer class="status-bar" role="status">
+    <span class="sb-section" id="sb-row-info">No row selected</span>
+    <span class="sb-sep"></span>
+    <span class="sb-section sb-progress" id="sb-progress">
+      <strong id="sb-done">0</strong>/<strong id="sb-total">0</strong>
+      <span class="bar"><span id="sb-bar" style="width:0"></span></span>
+    </span>
+    <span class="sb-spacer"></span>
+    <span class="sb-section sb-claude offline" id="sb-claude">
+      <span class="dot"></span>
+      <span id="sb-claude-text">Claude offline</span>
+    </span>
+    <span class="sb-sep"></span>
+    <span class="sb-section">
+      <span id="sb-save-state" title="auto-save state">●</span>
+      <span style="color:var(--c-text-faint)">saved</span>
+    </span>
+  </footer>
 
   <!-- ───── LEFT: Tree ──────────────────────────────────────────── -->
   <section class="pane tree-pane" aria-label="row tree">
@@ -11785,6 +12315,384 @@ function refreshLlmStatusCard(j) {
   moreBtn.onclick = () => toggleTopbarMenu();
   tabs.appendChild(moreBtn);
 })();
+
+// ============================================================
+// Phase A — Acrobat-style layout: rail / ribbon / AI pane / status
+// ============================================================
+
+// ── Activity rail panels ──────────────────────────────────────
+function setRailPanel(panel) {
+  // 'tree' is the default — no rail-panel attribute (keeps the existing
+  // tree-pane visible). For other panels (learn / versions / audit /
+  // search), open them as MODALS for now (existing UI). Future: render
+  // them inside .rail-panel-body for in-place navigation.
+  document.querySelectorAll('.activity-rail .rail-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.panel === panel);
+  });
+  // Tree panel = default state, no override
+  if (panel === 'tree' || !panel) {
+    document.body.removeAttribute('data-rail-panel');
+    return;
+  }
+  // For MVP, route other rail items to existing modal flows
+  if (panel === 'learn') showLearning();
+  else if (panel === 'versions') showVersions();
+  else if (panel === 'audit') showAudit();
+  // After the modal action, return rail to tree
+  setTimeout(() => {
+    document.querySelector('.activity-rail .rail-btn[data-panel="tree"]')?.classList.add('active');
+    document.querySelectorAll('.activity-rail .rail-btn').forEach(b => {
+      if (b.dataset.panel !== 'tree') b.classList.remove('active');
+    });
+  }, 200);
+}
+
+// ── Mode tabs (Verify / Edit / Re-annotate / Apply) ───────────
+function setMode(mode) {
+  document.body.setAttribute('data-mode', mode);
+  document.querySelectorAll('.ribbon-tab').forEach(t => {
+    const isActive = t.dataset.mode === mode;
+    t.classList.toggle('active', isActive);
+    t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  // Sync edit mode toggle with the existing toggleEditMode flow
+  if (mode === 'edit' && typeof EDIT_MODE !== 'undefined' && !EDIT_MODE) {
+    if (typeof toggleEditMode === 'function') toggleEditMode();
+  } else if (mode !== 'edit' && typeof EDIT_MODE !== 'undefined' && EDIT_MODE) {
+    if (typeof toggleEditMode === 'function') toggleEditMode();
+  }
+  // Apply mode → load AI proposal eagerly
+  if (mode === 'apply' && SELECTED_ROW) aiPaneRefresh();
+}
+// Default mode
+document.body.setAttribute('data-mode', 'verify');
+
+// ── AI pane toggle + render ───────────────────────────────────
+let _AI_PANE_OPEN = (localStorage.getItem('comply-ai-pane') !== '0');
+function applyAiPaneState() {
+  document.body.setAttribute('data-ai-pane', _AI_PANE_OPEN ? '1' : '0');
+}
+applyAiPaneState();
+function toggleAiPane() {
+  _AI_PANE_OPEN = !_AI_PANE_OPEN;
+  try { localStorage.setItem('comply-ai-pane', _AI_PANE_OPEN ? '1' : '0'); } catch (e) {}
+  applyAiPaneState();
+}
+
+// Cache last AI proposal per row to avoid re-fetching
+const _AI_CACHE = new Map();
+
+function aiPaneRender(row, plan) {
+  const body = document.getElementById('ai-pane-body');
+  const head = document.getElementById('ai-pane-head');
+  const sub  = document.getElementById('ai-pane-sub');
+  if (!body) return;
+  if (!row) {
+    body.innerHTML = `<div class="ai-empty">
+      <svg class="ico ico-xl" aria-hidden="true" style="opacity:0.3;margin-bottom:var(--s-3)"><use href="#i-sparkles"/></svg>
+      <div>เลือก row เพื่อเริ่ม</div>
+    </div>`;
+    if (sub) sub.textContent = 'ready';
+    return;
+  }
+  if (sub) sub.textContent = `R${row.row} · ${row.section || '?'}`;
+
+  // Compose a primary "Proposal" section from auto_annotate_plan
+  const conf = plan ? (plan.confidence || 0) : 0;
+  const confPct = Math.round(conf * 100);
+  const confCls = conf >= 0.85 ? '' : conf >= 0.6 ? 'med' : 'low';
+  const proposed = plan ? (plan.proposed_d || '') : '';
+  const generator = plan ? (plan.generator || 'rules') : '';
+  const usedClaude = generator.startsWith('claude');
+  const rationale = plan && plan.llm ? (plan.llm.rationale || '') : '';
+  const escalation = plan && plan.llm ? plan.llm.escalation : null;
+
+  const propSection = `
+    <div class="ai-section">
+      <h4>${ico('sparkles',14)}<span>Proposal</span> <span style="margin-left:auto;font-weight:500;text-transform:none;letter-spacing:0;color:var(--c-text-soft)">${escapeHtml(generator)}</span></h4>
+      ${proposed
+        ? `<div class="ai-proposal-text">${escapeHtml(proposed)}</div>
+           <div class="ai-conf-bar ${confCls}"><span style="width:${confPct}%"></span></div>
+           <div class="ai-conf-text">
+             <span>Confidence</span>
+             <strong>${confPct}%</strong>
+           </div>`
+        : '<div style="font-style:italic;color:var(--c-text-faint);font-size:var(--t-sm)">No proposal</div>'}
+      ${rationale ? `<div class="ai-rationale">${escapeHtml(rationale)}</div>` : ''}
+      ${escalation ? `
+        <div style="background:var(--c-warn-soft);border-left:3px solid var(--c-warn);padding:var(--s-3) var(--s-4);border-radius:0 var(--r-sm) var(--r-sm) 0;font-size:var(--t-xs);color:var(--c-warn-text);margin:var(--s-3) 0">
+          <strong>Claude is uncertain:</strong><br>${escapeHtml(escalation.question || '')}
+        </div>` : ''}
+      ${proposed ? `
+        <div class="ai-actions">
+          <button class="ai-accept" onclick="aiAccept()" title="Apply proposal · then verdict pass">${ico('check',14)}<span>Accept</span></button>
+          <button class="ai-edit" onclick="aiEditInline()">${ico('pencil',14)}<span>Edit</span></button>
+          <button class="ai-reject" onclick="aiReject()">${ico('x',14)}<span>Reject</span></button>
+        </div>` : ''}
+    </div>`;
+
+  // Teach-back section (always visible)
+  const teachSection = `
+    <div class="ai-section ai-teach">
+      <h4>${ico('brain',14)}<span>Teach Claude</span></h4>
+      <div class="ai-tags" id="ai-tags">
+        <span class="ai-tag" data-tag="#wrong-page" onclick="toggleAiTag(this)">#wrong-page</span>
+        <span class="ai-tag" data-tag="#brand-wrong" onclick="toggleAiTag(this)">#brand-wrong</span>
+        <span class="ai-tag" data-tag="#missing-spec" onclick="toggleAiTag(this)">#missing-spec</span>
+        <span class="ai-tag" data-tag="#typo" onclick="toggleAiTag(this)">#typo</span>
+        <span class="ai-tag" data-tag="#format" onclick="toggleAiTag(this)">#format</span>
+        <span class="ai-tag" data-tag="#commitment" onclick="toggleAiTag(this)">#commitment</span>
+      </div>
+      <textarea id="ai-teach-text" placeholder="ทำไมต้องแก้? (optional)"></textarea>
+      <button class="ai-send" onclick="aiTeachSend()">Send to Claude</button>
+    </div>`;
+
+  // Recent corrections (compact)
+  const recentSection = `
+    <div class="ai-section">
+      <h4>${ico('clock',14)}<span>Recent (last 5)</span></h4>
+      <div id="ai-recent" style="font-size:var(--t-xs);color:var(--c-text-soft);font-family:var(--f-mono)">loading…</div>
+    </div>`;
+
+  body.innerHTML = propSection + teachSection + recentSection;
+  // Lazy-load recent corrections
+  fetch('/api/learn/stats').then(r => r.json()).then(j => {
+    const el = document.getElementById('ai-recent');
+    if (!el || !j) return;
+    const acc = (j.accuracy * 100).toFixed(0);
+    el.innerHTML = `${j.total_feedbacks||0} feedbacks · ${acc}% accuracy<br>${j.patterns_total||0} patterns (${j.patterns_enabled||0} enabled)`;
+  }).catch(() => {});
+}
+
+async function aiPaneRefresh() {
+  if (!SELECTED_ROW) { aiPaneRender(null); return; }
+  const row = ROWS_BY_NUM[SELECTED_ROW];
+  if (!row) return;
+  // Show row context immediately, fetch proposal in bg
+  aiPaneRender(row, null);
+  if (_AI_CACHE.has(SELECTED_ROW)) {
+    aiPaneRender(row, _AI_CACHE.get(SELECTED_ROW));
+    return;
+  }
+  try {
+    const r = await fetch(`/api/auto_annotate/preview?row=${SELECTED_ROW}`);
+    const j = await r.json();
+    if (j && j.ok !== false) {
+      _AI_CACHE.set(SELECTED_ROW, j);
+      aiPaneRender(row, j);
+    }
+  } catch (e) {
+    console.warn('ai-pane fetch failed', e);
+  }
+}
+
+// AI action handlers
+async function aiAccept() {
+  if (!SELECTED_ROW) return;
+  const plan = _AI_CACHE.get(SELECTED_ROW);
+  if (!plan) { toast('No proposal to accept', '', 'warn', 2500); return; }
+  try {
+    const r = await fetch('/api/auto_annotate/apply', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({row: SELECTED_ROW, write_xlsx: true, write_pdf: true})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Proposal applied', `R${SELECTED_ROW} · Col D updated`, 'learn', 4000);
+      _AI_CACHE.delete(SELECTED_ROW);
+      await partialRefresh({reloadPdf: true});
+    } else {
+      toast('Apply failed', j.error || 'unknown', 'error', 4500);
+    }
+  } catch (e) { toast('Apply error', e.message, 'error', 4500); }
+}
+function aiEditInline() {
+  if (!SELECTED_ROW) return;
+  // Open inline Col D editor on the target row
+  const td = document.querySelector(`tr[data-row="${SELECTED_ROW}"] td.col-D`);
+  if (td && typeof editColD === 'function') {
+    editColD({currentTarget: td, stopPropagation: () => {}}, SELECTED_ROW);
+  }
+}
+async function aiReject() {
+  if (!SELECTED_ROW) return;
+  const plan = _AI_CACHE.get(SELECTED_ROW);
+  if (!plan) return;
+  // Required reason — focus the teach textarea
+  const t = document.getElementById('ai-teach-text');
+  if (t) {
+    t.placeholder = 'Why was this wrong? (required to record a rejection)';
+    t.focus();
+  }
+  toast('Add reason', 'พิมพ์เหตุผลใน Teach Claude แล้วกด Send', 'warn', 3500);
+}
+function toggleAiTag(el) {
+  el.classList.toggle('active');
+  const t = document.getElementById('ai-teach-text');
+  if (!t) return;
+  const tag = el.dataset.tag;
+  if (el.classList.contains('active')) {
+    if (!t.value.includes(tag)) t.value = (t.value ? t.value + ' ' : '') + tag;
+  } else {
+    t.value = t.value.replace(new RegExp('\\\\s*' + tag + '\\\\s*'), ' ').trim();
+  }
+}
+async function aiTeachSend() {
+  if (!SELECTED_ROW) return;
+  const t = document.getElementById('ai-teach-text');
+  const text = (t && t.value || '').trim();
+  if (!text) { toast('Empty', 'พิมพ์ข้อความก่อน', 'warn', 2500); return; }
+  // Record as feedback with provenance.user_note
+  const row = ROWS_BY_NUM[SELECTED_ROW];
+  const plan = _AI_CACHE.get(SELECTED_ROW) || {};
+  try {
+    const r = await fetch('/api/learn/feedback', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        row_num: SELECTED_ROW,
+        section: row?.section,
+        input_b: row?.B || '',
+        input_pdf_rel: row?.pdf_rel || null,
+        input_role: row?.role || '',
+        input_filename: row?.pdf_rel ? row.pdf_rel.split('/').pop() : null,
+        suggested_c: plan.proposed_c || '',
+        suggested_d: plan.proposed_d || '',
+        confidence: plan.confidence || 0,
+        generator: plan.generator || 'rules',
+        provenance: {user_note: text, llm: plan.llm || null},
+        user_action: 'edited',
+        final_c: row?.C || '',
+        final_d: row?.D || '',
+      }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Sent to Claude', `Feedback recorded for R${SELECTED_ROW}`, 'learn', 3500);
+      if (t) t.value = '';
+      document.querySelectorAll('#ai-tags .ai-tag.active').forEach(x => x.classList.remove('active'));
+      if (typeof tickRetrain === 'function') tickRetrain('teach-back');
+    }
+  } catch (e) { toast('Send error', e.message, 'error', 4000); }
+}
+
+// ── Status bar update ─────────────────────────────────────────
+function statusBarUpdate() {
+  const sbRow = document.getElementById('sb-row-info');
+  if (!sbRow) return;
+  const r = SELECTED_ROW ? ROWS_BY_NUM[SELECTED_ROW] : null;
+  if (r) {
+    const status = (DATA?.status?.[SELECTED_ROW]?.status) || 'unverified';
+    const pillCls = status !== 'unverified' ? `sb-pill ${status}` : '';
+    const pillTxt = ({pass:'✓ Pass', fail:'✗ Fail', need_fix:'⚠ Fix', skip:'⏭ Skip'})[status] || 'unverified';
+    const sec = r.section || '?';
+    const summary = (r.D || r.B || '').toString().slice(0, 80).trim();
+    sbRow.innerHTML = `<strong>R${r.row}</strong> · ${escapeHtml(sec)} ${pillCls ? '· <span class="' + pillCls + '">' + pillTxt + '</span>' : ''} <span style="color:var(--c-text-faint);margin-left:6px">${escapeHtml(summary)}</span>`;
+  } else {
+    sbRow.textContent = 'No row selected · click a row in the tree';
+  }
+  // Progress
+  if (DATA?.stats) {
+    const status = DATA.status || {};
+    const done = Object.values(status).filter(s => s.status && s.status !== 'unverified').length;
+    const total = DATA.stats.total || 0;
+    const pct = total ? Math.round(done/total * 100) : 0;
+    document.getElementById('sb-done').textContent = done;
+    document.getElementById('sb-total').textContent = total;
+    document.getElementById('sb-bar').style.width = pct + '%';
+  }
+}
+
+// Wire AI pane + status bar update into selectRow
+const _origSelectRowForLayout = selectRow;
+selectRow = async function(rowNum, scroll) {
+  await _origSelectRowForLayout(rowNum, scroll);
+  statusBarUpdate();
+  if (_AI_PANE_OPEN) aiPaneRefresh();
+};
+const _origSetStatusForStatusBar = setStatus;
+setStatus = async function(status) {
+  await _origSetStatusForStatusBar(status);
+  statusBarUpdate();
+};
+const _origRenderStatsForStatusBar = renderStats;
+renderStats = function() {
+  _origRenderStatsForStatusBar();
+  statusBarUpdate();
+};
+
+// Status bar: Claude status
+async function statusBarClaude() {
+  try {
+    const r = await fetch('/api/learn/llm_status');
+    const j = await r.json();
+    const sbC = document.getElementById('sb-claude');
+    const txt = document.getElementById('sb-claude-text');
+    if (!sbC || !txt) return;
+    if (j.available) {
+      sbC.classList.add('online'); sbC.classList.remove('offline');
+      txt.textContent = `${j.model || j.name} · $${(j.spent_today_usd || 0).toFixed(2)}/$${(j.budget_usd_per_day || 5).toFixed(0)}`;
+      // Also update header
+      const h = document.getElementById('ai-pane-head');
+      const sub = document.getElementById('ai-pane-sub');
+      if (h) h.setAttribute('data-status', 'online');
+      if (sub && SELECTED_ROW) sub.textContent = `R${SELECTED_ROW} · ${j.model || ''}`;
+    } else {
+      sbC.classList.remove('online'); sbC.classList.add('offline');
+      txt.textContent = 'Claude offline';
+      const h = document.getElementById('ai-pane-head');
+      if (h) h.setAttribute('data-status', 'offline');
+    }
+  } catch (e) {}
+}
+statusBarClaude();
+setInterval(statusBarClaude, 15000);   // refresh every 15s
+
+// Sync ribbon controls to existing state
+function _syncRibbonState() {
+  // Catalog page indicator
+  const pdfPg = document.getElementById('pdf-page-info');
+  const ribPg = document.getElementById('ribbon-pdf-page');
+  if (pdfPg && ribPg) ribPg.textContent = pdfPg.textContent;
+  // Context radius
+  const ctx = document.getElementById('ctx-radius');
+  const ribCtx = document.getElementById('ribbon-ctx-radius');
+  if (ctx && ribCtx) ribCtx.textContent = ctx.textContent;
+  // Sync hl-toggle ↔ ribbon-hl-toggle
+  const hl = document.getElementById('hl-toggle');
+  const rhl = document.getElementById('ribbon-hl-toggle');
+  if (hl && rhl) rhl.checked = hl.checked;
+  // Edit toolbar dirty + save
+  const dirty = document.getElementById('dirty-ind');
+  const ribDirty = document.getElementById('ribbon-dirty-ind');
+  if (dirty && ribDirty) ribDirty.textContent = dirty.textContent;
+  const save = document.getElementById('save-btn');
+  const ribSave = document.getElementById('ribbon-save-btn');
+  if (save && ribSave) ribSave.disabled = save.disabled;
+  const ub = document.getElementById('undo-btn');
+  const rub = document.getElementById('ribbon-undo-btn');
+  if (ub && rub) rub.disabled = ub.disabled;
+  const rb = document.getElementById('redo-btn');
+  const rrb = document.getElementById('ribbon-redo-btn');
+  if (rb && rrb) rrb.disabled = rb.disabled;
+  // Tools active state
+  const activeTool = document.querySelector('.edit-toolbar button.tool.active');
+  const tname = activeTool ? activeTool.dataset.tool : 'select';
+  document.querySelectorAll('.ribbon-mode-bar.mode-edit button[data-tool]').forEach(b => {
+    b.classList.toggle('active', b.dataset.tool === tname);
+  });
+  // Apply mode LLM summary
+  const llmSum = document.getElementById('ribbon-llm-summary');
+  if (llmSum) {
+    fetch('/api/learn/llm_status').then(r=>r.json()).then(j => {
+      if (j.available) llmSum.textContent = `Claude · ${j.model || j.name} · $${(j.spent_today_usd || 0).toFixed(2)}/day`;
+      else llmSum.textContent = `Claude OFF — paste API key in Settings`;
+    }).catch(() => {});
+  }
+}
+setInterval(_syncRibbonState, 800);
+
+// Initial state
+setTimeout(() => { statusBarUpdate(); _syncRibbonState(); }, 300);
 
 init();
 </script>
