@@ -6257,6 +6257,83 @@ select { cursor: pointer; }
   stroke-width: 2; stroke-dasharray: 4 2; pointer-events: none;
 }
 .pdf-canvas.edit-mode { background: var(--c-canvas-edit); }
+
+/* ── Phase A5: floating annotation toolbar (Acrobat-style) ───────────
+   Appears above the currently selected annotation in edit mode. Lives
+   on body to escape the catalog pane's stacking context, positioned
+   in viewport coordinates by JS. */
+.float-annot-toolbar {
+  position: fixed;
+  z-index: 320;             /* above topbar (10), below modals (350+) */
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18), 0 2px 4px rgba(0,0,0,0.08);
+  font-size: var(--t-sm);
+  user-select: none;
+  white-space: nowrap;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.float-annot-toolbar.visible {
+  display: inline-flex;
+  opacity: 1;
+  transform: translateY(0);
+}
+.float-annot-toolbar .fat-type {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px; border-radius: 4px;
+  background: var(--c-bg-soft); color: var(--c-text-soft);
+  font-weight: 600; font-size: 11px;
+}
+.float-annot-toolbar .fat-sep {
+  width: 1px; align-self: stretch; background: var(--c-border); margin: 0 2px;
+}
+.float-annot-toolbar .fat-swatch {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.15);
+  vertical-align: middle;
+}
+.float-annot-toolbar .fat-meta {
+  color: var(--c-text-soft); font-size: 11px;
+}
+.float-annot-toolbar button.fat-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border-radius: 5px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--c-text); cursor: pointer;
+  font-size: var(--t-sm);
+}
+.float-annot-toolbar button.fat-btn:hover {
+  background: var(--c-bg-soft); border-color: var(--c-border);
+}
+.float-annot-toolbar button.fat-btn.danger { color: var(--c-danger-text); }
+.float-annot-toolbar button.fat-btn.danger:hover {
+  background: var(--c-danger-soft); border-color: var(--c-danger);
+}
+.float-annot-toolbar .fat-arrow {
+  position: absolute;
+  bottom: -6px; left: 16px;
+  width: 10px; height: 10px;
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+  transform: rotate(45deg);
+}
+.float-annot-toolbar.below .fat-arrow {
+  bottom: auto; top: -6px;
+  border-right: none; border-bottom: none;
+  border-left: 1px solid var(--c-border);
+  border-top: 1px solid var(--c-border);
+}
 .pdf-canvas.edit-mode.tool-drawRect { cursor: crosshair; }
 .pdf-canvas.edit-mode.tool-addText { cursor: text; }
 
@@ -7721,6 +7798,7 @@ select { cursor: pointer; }
     <symbol id="i-square" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/></symbol>
     <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M3 3l7.5 18 2.5-7 7-2.5z"/></symbol>
     <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   </defs>
 </svg>
 
@@ -8419,6 +8497,23 @@ select { cursor: pointer; }
 
 <!-- Toast notifications (top-right) -->
 <div id="toasts" class="toast-stack" role="region" aria-live="polite" aria-label="notifications"></div>
+
+<!-- Phase A5: floating annotation toolbar (mounted on body to escape
+     stacking contexts; visibility + position are driven by JS).      -->
+<div id="float-annot-toolbar" class="float-annot-toolbar" role="toolbar" aria-label="annotation actions">
+  <span class="fat-type" id="fat-type"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-square"/></svg><span id="fat-type-label">Square</span></span>
+  <span class="fat-sep"></span>
+  <span class="fat-swatch" id="fat-color-swatch" title="Stroke color (red)"></span>
+  <span class="fat-meta" id="fat-meta">1pt</span>
+  <span class="fat-sep"></span>
+  <button class="fat-btn" id="fat-duplicate" type="button" onclick="duplicateSelected()" title="Duplicate (D)" aria-label="duplicate annotation">
+    <svg class="ico ico-sm" aria-hidden="true"><use href="#i-copy"/></svg><span>Duplicate</span>
+  </button>
+  <button class="fat-btn danger" id="fat-delete" type="button" onclick="deleteSelected()" title="Delete (Del)" aria-label="delete annotation">
+    <svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg><span>Delete</span>
+  </button>
+  <span class="fat-arrow" aria-hidden="true"></span>
+</div>
 
 <!-- Always-on floating Settings access — survives any top-overlay (browser
      extension / Claude Preview toolbar / etc.) covering the topbar. -->
@@ -9642,6 +9737,8 @@ function refreshOverlay() {
     if (sel) OVERLAY_SVG.appendChild(buildHandles(sel));
   }
   renderAnnots();
+  // Phase A5: keep floating toolbar in sync with selection + annot pos
+  if (typeof updateFloatingToolbar === 'function') updateFloatingToolbar();
 }
 
 // Compute the FreeText fontsize from rect height — must mirror the
@@ -9946,6 +10043,133 @@ function deleteSelected() {
   refreshOverlay();
   refreshUndoRedoButtons();
 }
+
+// Phase A5: clone the selected annot with a small offset so the user
+// sees both original and copy. The clone is a NEW annot (no xref);
+// when the user saves, apply_pdf_edits mints it as a fresh PDF annot.
+function duplicateSelected() {
+  if (!SELECTED_ANN_ID) return;
+  const orig = EDIT_ANNOTS.find(a => a._id === SELECTED_ANN_ID);
+  if (!orig) return;
+  _commitBeforeChange();
+  const OFF = 12;  // PDF-pt offset
+  const id = newClientId();
+  const r = orig.rect;
+  // Clamp the offset so the duplicate doesn't fall off the page
+  const pageSize = (CURRENT_PDF && CURRENT_PDF.meta && CURRENT_PDF.meta.page_sizes[PDF_PAGE - 1]) || [595, 842];
+  const w = r[2] - r[0], h = r[3] - r[1];
+  const dx = (r[2] + OFF <= pageSize[0]) ? OFF : -OFF;
+  const dy = (r[3] + OFF <= pageSize[1]) ? OFF : -OFF;
+  const clone = {
+    _id: id, _isNew: true,
+    xref: null,
+    page: orig.page,
+    type: orig.type,
+    rect: [r[0] + dx, r[1] + dy, r[0] + dx + w, r[1] + dy + h],
+    contents: orig.contents || '',
+  };
+  EDIT_ANNOTS.push(clone);
+  SELECTED_ANN_ID = id;
+  setDirty(true);
+  refreshOverlay();
+  refreshUndoRedoButtons();
+}
+
+// ── Phase A5: floating annotation toolbar ──────────────────────
+// Mounted on <body> to escape stacking contexts. Driven by:
+//   • SELECTED_ANN_ID  — show/hide
+//   • EDIT_MODE        — only visible in edit/reannotate
+//   • refreshOverlay() — repositions after any visible change
+//   • catalog scroll/zoom/page change — repositions
+let _FAT_RAF = 0;
+function _fatEl() { return document.getElementById('float-annot-toolbar'); }
+function updateFloatingToolbar() {
+  // rAF coalesce — if multiple events fire in one frame, do one paint
+  if (_FAT_RAF) return;
+  _FAT_RAF = requestAnimationFrame(() => {
+    _FAT_RAF = 0;
+    _updateFloatingToolbarNow();
+  });
+}
+function _updateFloatingToolbarNow() {
+  const tb = _fatEl();
+  if (!tb) return;
+  const ann = SELECTED_ANN_ID
+    ? EDIT_ANNOTS.find(a => a._id === SELECTED_ANN_ID && !a._deleted)
+    : null;
+  if (!EDIT_MODE || !ann || !OVERLAY_SVG) {
+    tb.classList.remove('visible');
+    return;
+  }
+  // Find the rendered SVG group for this annot
+  const node = OVERLAY_SVG.querySelector('g.annot[data-id="' + (CSS.escape ? CSS.escape(ann._id) : ann._id) + '"]');
+  if (!node) {
+    tb.classList.remove('visible');
+    return;
+  }
+  // Clip-aware: hide if the annot scrolled out of the catalog pane
+  const rect = node.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    tb.classList.remove('visible');
+    return;
+  }
+  // Catalog viewport bounds (the .pdf-canvas / pdf column that owns the SVG)
+  const pdfWrap = OVERLAY_SVG.closest('.pdf-canvas') || OVERLAY_SVG.closest('.pdf-pane') || OVERLAY_SVG.parentElement;
+  if (pdfWrap) {
+    const wrapR = pdfWrap.getBoundingClientRect();
+    const intersects =
+      rect.right >= wrapR.left && rect.left <= wrapR.right &&
+      rect.bottom >= wrapR.top && rect.top <= wrapR.bottom;
+    if (!intersects) {
+      tb.classList.remove('visible');
+      return;
+    }
+  }
+  // Update labels
+  const typeLbl = document.getElementById('fat-type-label');
+  const typeIco = tb.querySelector('.fat-type use');
+  if (typeLbl) typeLbl.textContent = ann.type === 'FreeText' ? 'FreeText' : 'Square';
+  if (typeIco) typeIco.setAttribute('href', ann.type === 'FreeText' ? '#i-text' : '#i-square');
+  const swatch = document.getElementById('fat-color-swatch');
+  if (swatch) swatch.style.background = 'rgb(255,0,0)';
+  const meta = document.getElementById('fat-meta');
+  if (meta) meta.textContent = ann.type === 'FreeText' ? 'red text' : '1pt red';
+
+  // Position above (or below if no room)
+  tb.classList.add('visible');
+  // Force a reflow so width is measured with the new content
+  const tbW = tb.offsetWidth || 220;
+  const tbH = tb.offsetHeight || 40;
+  const GAP = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+
+  let top = rect.top - tbH - GAP;
+  let placeBelow = false;
+  if (top < 8) {
+    top = rect.bottom + GAP;
+    placeBelow = true;
+  }
+  // Center on the annot but clamp to viewport
+  let left = rect.left + rect.width / 2 - tbW / 2;
+  left = Math.max(8, Math.min(left, vw - tbW - 8));
+  if (top + tbH > vh - 8) top = vh - tbH - 8;
+
+  tb.style.left = Math.round(left) + 'px';
+  tb.style.top = Math.round(top) + 'px';
+  tb.classList.toggle('below', placeBelow);
+
+  // Position the arrow pointing back at the annot
+  const arrow = tb.querySelector('.fat-arrow');
+  if (arrow) {
+    const annCenterX = rect.left + rect.width / 2;
+    let arrowX = annCenterX - left - 5;  // arrow is 10px wide
+    arrowX = Math.max(8, Math.min(arrowX, tbW - 18));
+    arrow.style.left = Math.round(arrowX) + 'px';
+  }
+}
+// Repaint on common reposition triggers
+window.addEventListener('scroll', updateFloatingToolbar, true);
+window.addEventListener('resize', updateFloatingToolbar);
 
 // ── Inline text editor ─────────────────────────────────────────
 let TEXT_EDITOR = null;
@@ -11414,6 +11638,10 @@ document.addEventListener('keydown', e => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && SELECTED_ANN_ID) {
       e.preventDefault(); deleteSelected(); return;
     }
+    // Phase A5: D = duplicate selected annotation (Acrobat-style)
+    if ((e.key === 'd' || e.key === 'D') && !e.metaKey && !e.ctrlKey && SELECTED_ANN_ID) {
+      e.preventDefault(); duplicateSelected(); return;
+    }
     if (e.key === 'Escape') {
       if (TEXT_EDITOR) cancelTextEditor();
       else if (DIRTY) toggleEditMode();
@@ -12363,6 +12591,8 @@ function setMode(mode) {
   }
   // Apply mode → load AI proposal eagerly
   if (mode === 'apply' && SELECTED_ROW) aiPaneRefresh();
+  // Phase A5: floating toolbar visibility tracks edit mode
+  if (typeof updateFloatingToolbar === 'function') updateFloatingToolbar();
 }
 // Default mode
 document.body.setAttribute('data-mode', 'verify');

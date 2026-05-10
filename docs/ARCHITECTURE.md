@@ -423,3 +423,291 @@ If you (human or AI) just walked into this project:
 If you're an AI and the user asks you to fix a bug, **ask which row
 number / file / function** — don't rely on conversation memory across
 context-window compaction.
+
+---
+
+## 12. Phase 13–17 additions (Acrobat-style UI + Claude integration)
+
+The five most recent phases reshaped both the UI and the AI plumbing.
+Read this section together with `docs/CHANGELOG.md` Phases 13–17 if
+you're picking up after these changes.
+
+### 12.1 Module layout — what's new
+
+```
+comply-module/
+├── comply_verify_gui.py        ← still the monolith glue (now ~12K LOC)
+├── .env / .env.example         ← API key + model + budget (gitignored)
+└── app/
+    ├── __init__.py
+    ├── core.py
+    ├── database.py             ← + `llm_calls` table (Phase 15)
+    ├── learning.py             ← + Anthropic bridge via install_into_learning()
+    └── anthropic_provider.py   ← NEW (Phase 15) — Claude wrapper
+```
+
+`anthropic_provider.py` is the **only** file that imports the Anthropic
+SDK. Everything else talks to learning's existing `set_llm_provider()`
+seam. This keeps the LLM swap-out point single-sourced.
+
+### 12.2 Anthropic provider (`app/anthropic_provider.py`)
+
+```
+AnthropicProvider
+  ├─ __init__(api_key, model, budget_usd_per_day)
+  ├─ tools = [
+  │     propose_col_d(ref, page, label),
+  │     propose_brand_model(brand, model),
+  │     escalate_to_user(question, options),
+  │   ]
+  ├─ system blocks (4 ephemeral cache_control entries):
+  │     1. role + invariants
+  │     2. SKILL.md (verbatim)
+  │     3. project knowledge base summary
+  │     4. last N learned_patterns
+  ├─ propose(prompt, context, row_num) → ToolUseResult
+  ├─ BudgetExceededError when day spend ≥ cap
+  └─ records every call into `llm_calls` (db.log_llm_call)
+
+get_provider()                 ← module-level singleton
+install_into_learning()        ← bridges to learning.set_llm_provider
+```
+
+Lifecycle:
+
+1. Boot reads `ANTHROPIC_API_KEY` from `.env` (or env). If present and
+   non-empty, `install_into_learning()` wires it.
+2. `learning.suggest_for_row()` calls Claude **only** when rules +
+   learned patterns yield confidence < 0.85.
+3. Each call:
+   - prompt + system blocks sent
+   - Anthropic returns tool_use blocks
+   - we record `(input_tokens, output_tokens, cache_write, cache_read,
+     cost_usd, elapsed_ms)` to `llm_calls`
+   - return value funnels back through `learning_feedback` so user
+     verdicts still produce training signal
+
+The provider intentionally has **no fallback**: on `BudgetExceededError`
+or network failure we return None and the caller falls back to rules.
+Don't add silent retries — that masks both bugs and runaway spend.
+
+### 12.3 New DB table — `llm_calls`
+
+```sql
+CREATE TABLE llm_calls (
+    call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TIMESTAMP NOT NULL,
+    row_num INTEGER,
+    model TEXT,
+    stop_reason TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cost_usd REAL,
+    elapsed_ms INTEGER,
+    tool_calls_json TEXT,
+    response_text TEXT,
+    prompt_size_chars INTEGER
+);
+```
+
+Used for:
+- Daily budget enforcement (sum cost_usd WHERE date(ts) = today)
+- AI panel "today's spend" badge
+- Debugging tool-use behaviour after the fact (tool_calls_json)
+
+Like all derived tables, it's safe to delete; rebuilds empty on next
+boot.
+
+### 12.4 Frontend layout — 5 columns × 6 rows grid (Phase 16)
+
+The legacy "topbar + 3-pane content + floating action bar" was
+replaced with a CSS Grid that gives every persistent surface a named
+slot. This is the **Phase A** Acrobat-style frame.
+
+```
+                ┌────── grid-template-columns ──────┐
+                rail   tree   center   pdf     ai
+              ┌───────┬──────┬────────┬──────┬──────┐
+   safetop   │       (--safe-top spacer, full-width) │   ← row 1
+              ├───────┴──────┴────────┴──────┴──────┤
+   topbar    │ logo · project · sync · settings     │   ← row 2 (z=10)
+              ├──────────────────────────────────────┤
+   ribbon    │ mode-tabs · tools (mode-aware)       │   ← row 3
+              ├───────┬──────┬────────┬──────┬──────┤
+   content   │ rail  │ tree │ row    │ pdf  │ ai   │   ← row 4 (1fr)
+              │       │      │ inspect│ view │ pane │
+              ├───────┴──────┴────────┴──────┴──────┤
+   action    │ verdict / notes / auto / mark        │   ← row 5 (76px)
+              ├──────────────────────────────────────┤
+   status    │ row · pdf · sync · claude badge      │   ← row 6 (28px)
+              └──────────────────────────────────────┘
+```
+
+CSS template:
+```
+grid-template-columns: var(--rail-w) var(--tree-w) 1fr var(--pdf-w) var(--ai-w);
+grid-template-rows:    var(--safe-top) auto auto 1fr var(--action-bar-h) var(--status-bar-h);
+grid-template-areas:
+  "safetop safetop safetop safetop safetop"
+  "topbar  topbar  topbar  topbar  topbar"
+  "ribbon  ribbon  ribbon  ribbon  ribbon"
+  "rail    tree    center  pdf     ai"
+  "action  action  action  action  action"
+  "status  status  status  status  status";
+```
+
+### 12.5 Mode tabs (Verify / Edit / Re-annotate / Apply Auto)
+
+Mode is now an explicit ribbon control, not a scattered set of toggles.
+
+```
+setMode(name)
+  ├─ updates --mode dataset attr on root
+  ├─ for back-compat:
+  │    'edit'        → EDIT_MODE = true
+  │    'reannotate'  → enters wizard (calls openReannotateWizard)
+  │    'auto-apply'  → triggers auto-annotate flow
+  │    'verify'      → EDIT_MODE = false, exits wizards
+  ├─ ribbon shows the matching tool group (ribbon-mode-* divs)
+  └─ _syncRibbonState() updates buttons enabled/disabled
+```
+
+Critical rule: **mode is the source of truth for which tools render**.
+Don't add new tools that don't belong to a mode. If a tool is
+universally useful, put it in the topbar (settings, theme, layout) or
+status bar (sync, badges).
+
+### 12.6 AI pane (right column)
+
+```
+.ai-pane
+  ├─ header (badge, refresh, close)
+  ├─ proposal card    — `aiPaneRefresh()` populates from
+  │                     /api/auto_annotate/preview for selected row
+  ├─ inline actions   — Accept / Edit / Reject buttons trigger
+  │                     aiAccept(), aiEdit(), aiReject()
+  ├─ tags             — toggleAiTag() adds positive/negative training tags
+  └─ teach-back       — aiTeachSend() POSTs free-form correction to
+                        /api/learn/feedback with kind='teach'
+```
+
+`toggleAiPane()` collapses the column to 0 width via CSS variable
+swap (`--ai-w: 0`); the grid template re-evaluates and the pdf column
+reclaims space — no JS layout work needed.
+
+### 12.7 `--safe-top` + embedded mode
+
+The top of the viewport is regularly covered by:
+- Claude Preview MCP toolbar (when in Claude Code preview iframe)
+- Safari / browser toolbars on macOS
+
+We ship a CSS variable `--safe-top` (default 0) that offsets the entire
+grid. The first row is reserved as a transparent spacer of that
+height.
+
+Auto-detection:
+```js
+if (window.self !== window.top) {
+  document.documentElement.style.setProperty('--safe-top', '56px');
+}
+```
+
+User override: settings menu "Safe top offset" slider (0–120 px) writes
+to `localStorage` and applies on boot.
+
+Backup access: a fixed FAB at bottom-left exposes `Settings` and
+`Layout` so the user is never locked out even if `--safe-top` is wrong.
+
+### 12.8 Boot speedup
+
+Old `_build_pdf_records_for_db()` called `list_pdf_annots()` for every
+PDF (~101 of them × Google Drive on-demand fetch ≈ 60–90 s).
+
+The DB's `pdf_annotations` table was **write-only** at boot — no read
+path needed it warmed. Removed the per-PDF annot scan; annots fetched
+live via `/api/pdf_meta?pdf=…` when the user opens a catalog.
+
+Result: cold boot dropped from ~70 s to ~7 s on Google Drive.
+
+### 12.9 WYSIWYG annotation render (Phase 17)
+
+Edit mode used to render the page with `no_annots=True` and re-paint
+all annots from JSON via SVG. This was systemically off because
+PyMuPDF SVG ≠ PyMuPDF baked-PDF (font hinting, banner backgrounds,
+border rounding all differ).
+
+New render contract:
+- **Always bake all existing annots into the page bytes**, even in
+  edit mode. The base image is byte-identical to preview.
+- The SVG overlay paints **only** annots with `_isNew=true` or
+  `id === SELECTED_ANN_ID`. New ones aren't in the baked PDF yet;
+  the selected one needs handles.
+- Saving a new annot: `apply_pdf_edits` mints it into the PDF, then
+  the page is re-rendered (now baked), and the SVG drops `_isNew`.
+
+This is enforced in `comply_verify_gui.py` `render_page()` and the JS
+overlay in `refreshOverlay()`.
+
+### 12.10 Two filesystems, one git workflow
+
+The user's working directory is on Google Drive (iCloud-style
+on-demand sync). `.git/` operations there silently time out.
+
+Workflow (already established, document it for future agents):
+
+1. Real git work happens in `/tmp/comply-git-work/smart-bos/`
+2. After commit + push, `cp` modified source files back to the Google
+   Drive working directory so the running Flask app picks them up
+3. `.env` is **only** in Google Drive (never copied to /tmp clone) —
+   it's gitignored and would leak the API key
+
+Don't try to make `.git/` work on Google Drive. macOS's iCloud
+Files-On-Demand can't satisfy git's tight latency requirements.
+
+### 12.11 Floating annotation toolbar (Phase A5)
+
+Phase A5 adds a small toolbar that floats above the currently selected
+annotation, Acrobat-style:
+
+```
+                  ┌──────────────────────────────────┐
+                  │ Square · color · width · 🗑 · ⎘ │
+                  └──────────────────────────────────┘
+                  ┌─────────────┐
+                  │ (the rect)  │
+                  └─────────────┘
+```
+
+Implementation:
+- DOM: single `#float-annot-toolbar` element appended to body
+  (escapes any stacking context). Visibility tied to
+  `SELECTED_ANN_ID`.
+- Position: computed from the SVG group's `getBoundingClientRect()`,
+  flipped below the annot if it would overflow the top.
+- Reposition triggers: catalog scroll, page change, zoom, window
+  resize, annot drag/resize. All call the same `repositionFloatingToolbar()`.
+- Actions: `Delete` (existing `deleteAnnot`), `Duplicate` (clone with
+  +12pt offset, mark `_isNew`).
+- Properties: color (red/orange) + border width — write through to
+  the annot dict, refresh overlay, no PDF edit until Save.
+
+Hides automatically when:
+- selection cleared (Esc, click empty space)
+- mode switches away from `edit` or `reannotate`
+- the SVG element scrolls out of view
+
+---
+
+## 13. Bootstrap (updated)
+
+If you're an AI agent restarting after context compaction:
+
+1. Re-read `MEMORY.md` and any user/feedback memories.
+2. Skim `docs/CHANGELOG.md` Phase 13–17 entries for **what** changed.
+3. Skim this file's section 12 for **why** + module map.
+4. Re-orient on the user's last message before continuing.
+5. Don't re-implement anything described as "done" unless explicitly
+   asked — verify with `git log --oneline -20` from the /tmp clone
+   first.
