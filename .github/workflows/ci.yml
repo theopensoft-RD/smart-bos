@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Type check (pyright)
+        run: uv run pyright app/
+        continue-on-error: true   # advisory until full type coverage
+
+      # The smoke suite needs project data (xlsx + PDFs), which lives in
+      # the team's GDrive folder — not present on CI runners. We therefore
+      # run a minimal "module + lint" check instead of the full pytest.
+      - name: Importability check
+        run: |
+          uv run python -c "
+          import ast
+          ast.parse(open('comply_verify_gui.py').read())
+          for p in ['app/catalog.py','app/export.py','app/continuity.py',
+                   'app/claude_code_provider.py',
+                   'app/routes/__init__.py','app/routes/catalog_api.py',
+                   'app/routes/export_api.py','app/routes/continuity_api.py']:
+              ast.parse(open(p).read())
+          print('all modules parse OK')
+          "
+
+      - name: Validate JS template syntax (node)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check JS in template
+        run: |
+          uv run python -c "
+          import re
+          src = open('app/server/templates/index.html').read()
+          m = re.findall(r'<script[^>]*>(.*?)</script>', src, flags=re.DOTALL)
+          biggest = max(m, key=len)
+          open('/tmp/check_js.js','w').write(biggest)
+          print(f'extracted {len(biggest)} bytes')
+          "
+          node --check /tmp/check_js.js
+          echo "JS syntax OK"

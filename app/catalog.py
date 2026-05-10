@@ -174,13 +174,18 @@ def ingest_output_dir(output_root: Path, *, force: bool = False) -> dict:
     Idempotent: re-running won't duplicate. ``force=True`` re-extracts
     metadata even when a row already exists.
 
-    Returns counts: {scanned, inserted, updated, skipped}.
+    Ops-2 (2026-05-10): fast-skip path — if a row already exists AND its
+    stored ``pdf_sha256`` matches the current file's first 4 MB hash,
+    skip everything (no fitz open, no metadata reparse). On 309-PDF /
+    cold-cache GDrive this drops boot from ~10 s to ~0.5 s.
+
+    Returns counts: {scanned, inserted, updated, skipped, skipped_sha}.
     """
     output_root = Path(output_root).resolve()
     if not output_root.exists():
         return {"ok": False, "error": f"{output_root} not found"}
 
-    inserted = updated = skipped = scanned = 0
+    inserted = updated = skipped = skipped_sha = scanned = 0
     pdfs = sorted(output_root.rglob("*.pdf"))
 
     # Lazy import fitz only if there's at least one PDF (small speedup
@@ -191,12 +196,29 @@ def ingest_output_dir(output_root: Path, *, force: bool = False) -> dict:
         fitz = None
 
     with db.conn() as c:
+        # Pre-fetch existing (rel → (catalog_id, pdf_sha256)) to avoid
+        # one query per file
+        existing_map: dict[str, tuple[int, str | None]] = {}
+        for r in c.execute("SELECT catalog_id, pdf_rel, pdf_sha256 FROM catalogs"):
+            existing_map[r["pdf_rel"]] = (int(r["catalog_id"]),
+                                            r["pdf_sha256"])
+
         for pdf in pdfs:
             scanned += 1
             try:
                 rel = str(pdf.relative_to(output_root))
             except ValueError:
                 continue
+
+            existing = existing_map.get(rel)
+
+            # Ops-2 fast path: existing row + sha matches → skip everything
+            if existing and not force and existing[1]:
+                cur_sha = _sha256_file(pdf)
+                if cur_sha == existing[1]:
+                    skipped_sha += 1
+                    continue
+
             sha = _sha256_file(pdf)
             section = _parse_section_from_path(rel)
             brand, model = _guess_brand_model_from_filename(pdf.stem)
@@ -209,9 +231,6 @@ def ingest_output_dir(output_root: Path, *, force: bool = False) -> dict:
                 except Exception:
                     pages = None
 
-            existing = c.execute(
-                "SELECT catalog_id FROM catalogs WHERE pdf_rel = ?", (rel,)
-            ).fetchone()
             if existing and not force:
                 skipped += 1
                 continue
@@ -222,7 +241,7 @@ def ingest_output_dir(output_root: Path, *, force: bool = False) -> dict:
                                             updated_at=?
                        WHERE catalog_id=?""",
                     (sha, pages, brand, model, section, _now(),
-                     existing["catalog_id"]),
+                     existing[0]),
                 )
                 updated += 1
             else:
@@ -234,7 +253,8 @@ def ingest_output_dir(output_root: Path, *, force: bool = False) -> dict:
                 )
                 inserted += 1
     return {"ok": True, "scanned": scanned, "inserted": inserted,
-            "updated": updated, "skipped": skipped}
+            "updated": updated, "skipped": skipped,
+            "skipped_sha": skipped_sha}
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +322,137 @@ def update_catalog(catalog_id: int, **fields) -> bool:
     with db.conn() as c:
         c.execute(sql, params)
     return True
+
+
+# UX-2: bulk catalog metadata cleanup ---------------------------------------
+
+def bulk_update_brand(*, match: str, new_brand: str | None,
+                       match_type: str = "exact",
+                       only_field: str = "brand") -> dict:
+    """Find catalogs whose ``brand`` equals/contains ``match`` and rewrite
+    it to ``new_brand`` (or NULL if new_brand is empty).
+
+    match_type: "exact" | "contains" | "prefix" | "regex"
+    only_field: "brand" | "model" | "category" | "section_hint"
+
+    Returns ``{matched: int, updated: int, ids: [int]}``.
+    """
+    if only_field not in ("brand", "model", "category", "section_hint"):
+        raise ValueError("only_field must be brand/model/category/section_hint")
+
+    # Build the WHERE clause based on match_type
+    where_sql = ""
+    where_params: list[Any] = []
+    if match_type == "exact":
+        if match == "":
+            where_sql = f"({only_field} IS NULL OR {only_field} = '')"
+        else:
+            where_sql = f"{only_field} = ?"
+            where_params = [match]
+    elif match_type == "contains":
+        where_sql = f"{only_field} LIKE ?"
+        where_params = [f"%{match}%"]
+    elif match_type == "prefix":
+        where_sql = f"{only_field} LIKE ?"
+        where_params = [f"{match}%"]
+    elif match_type == "regex":
+        # SQLite REGEXP needs an extension; fall back to LIKE-anchored
+        # patterns the caller can express, or just iterate in Python.
+        # For simplicity, list all candidates then filter in Python.
+        import re as _re
+        try:
+            _ = _re.compile(match)
+        except _re.error as e:
+            raise ValueError(f"bad regex: {e}") from e
+        return _bulk_update_regex(match, new_brand, only_field)
+    else:
+        raise ValueError(f"unknown match_type: {match_type}")
+
+    new_val = new_brand if new_brand else None
+    with db.conn() as c:
+        rows = c.execute(
+            f"SELECT catalog_id FROM catalogs WHERE archived = 0 AND {where_sql}",
+            where_params,
+        ).fetchall()
+        ids = [int(r["catalog_id"]) for r in rows]
+        if not ids:
+            return {"matched": 0, "updated": 0, "ids": []}
+        # Update via parametrized IN clause
+        placeholders = ",".join("?" for _ in ids)
+        params = [new_val, _now()] + ids
+        c.execute(
+            f"UPDATE catalogs SET {only_field} = ?, updated_at = ? "
+            f"WHERE catalog_id IN ({placeholders})",
+            params,
+        )
+    return {"matched": len(ids), "updated": len(ids), "ids": ids}
+
+
+def _bulk_update_regex(pattern: str, new_value: str | None,
+                       field: str) -> dict:
+    """Regex-based variant — pull all rows then filter in Python."""
+    import re as _re
+    pat = _re.compile(pattern)
+    new_val = new_value if new_value else None
+    with db.conn() as c:
+        rows = c.execute(
+            f"SELECT catalog_id, {field} AS val FROM catalogs WHERE archived = 0"
+        ).fetchall()
+        ids = [int(r["catalog_id"]) for r in rows
+               if r["val"] is not None and pat.search(r["val"])]
+        if not ids:
+            return {"matched": 0, "updated": 0, "ids": []}
+        placeholders = ",".join("?" for _ in ids)
+        params = [new_val, _now()] + ids
+        c.execute(
+            f"UPDATE catalogs SET {field} = ?, updated_at = ? "
+            f"WHERE catalog_id IN ({placeholders})",
+            params,
+        )
+    return {"matched": len(ids), "updated": len(ids), "ids": ids}
+
+
+def bulk_match_preview(*, match: str, match_type: str = "exact",
+                        field: str = "brand", limit: int = 50) -> list[dict]:
+    """Preview rows that would be matched (for the UI dialog)."""
+    if field not in ("brand", "model", "category", "section_hint"):
+        raise ValueError("field must be brand/model/category/section_hint")
+
+    if match_type == "regex":
+        import re as _re
+        try:
+            pat = _re.compile(match)
+        except _re.error as e:
+            raise ValueError(f"bad regex: {e}") from e
+        with db.conn() as c:
+            all_rows = c.execute(
+                f"SELECT catalog_id, brand, model, section_hint, pdf_rel, {field} "
+                f"FROM catalogs WHERE archived = 0",
+            ).fetchall()
+            out = [dict(r) for r in all_rows
+                   if r[field] is not None and pat.search(r[field])][:limit]
+            return out
+
+    if match_type == "exact":
+        if match == "":
+            where_sql = f"({field} IS NULL OR {field} = '')"
+            params: list[Any] = []
+        else:
+            where_sql = f"{field} = ?"; params = [match]
+    elif match_type == "contains":
+        where_sql = f"{field} LIKE ?"; params = [f"%{match}%"]
+    elif match_type == "prefix":
+        where_sql = f"{field} LIKE ?"; params = [f"{match}%"]
+    else:
+        raise ValueError(f"unknown match_type: {match_type}")
+
+    with db.conn() as c:
+        rows = c.execute(
+            f"SELECT catalog_id, brand, model, section_hint, pdf_rel "
+            f"FROM catalogs WHERE archived = 0 AND {where_sql} "
+            f"LIMIT ?", params + [limit],
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

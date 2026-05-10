@@ -5172,12 +5172,22 @@ def boot() -> None:
             proj = catalog.get_active_project()
         result = catalog.ingest_output_dir(OUTPUT)
         if result.get("ok"):
+            sha_skip = result.get('skipped_sha', 0)
             print(f"[boot] catalog library: {result['scanned']} PDFs scanned "
                   f"({result['inserted']} new, {result['updated']} updated, "
-                  f"{result['skipped']} unchanged) · "
-                  f"active project={proj.get('name') if proj else '?'}")
+                  f"{result['skipped']} unchanged"
+                  + (f", {sha_skip} fast-skip-by-sha" if sha_skip else "")
+                  + f") · active project={proj.get('name') if proj else '?'}")
     except Exception as e:
         sys.stderr.write(f"[boot] catalog ingest failed: {e}\n")
+
+    # Ops-1 (2026-05-10): register atexit hook that writes a continuity
+    # STATE file on shutdown — captures what this session did.
+    try:
+        from app import continuity as _cont
+        _cont.install_atexit_hook(root=ROOT)
+    except Exception as e:
+        sys.stderr.write(f"[boot] continuity hook failed: {e}\n")
 
     # Load .env file (if present) so ANTHROPIC_API_KEY etc. are available
     _load_dotenv(ROOT / ".env")

@@ -1082,6 +1082,26 @@ body[data-row-selected="0"] .status-bar .sb-vbtn { opacity: 0.4; pointer-events:
   color: var(--c-text-muted); font-weight: 500;
 }
 
+/* UX-1: Project / company switcher pill in topbar */
+.topbar-project {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; margin-left: var(--s-3);
+  border: 1px solid var(--c-primary);
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 600;
+  cursor: pointer;
+  max-width: 280px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: filter 100ms;
+}
+.topbar-project:hover { filter: brightness(0.96); }
+.topbar-project #topbar-project-label {
+  overflow: hidden; text-overflow: ellipsis;
+}
+
 /* Continuity badge in topbar — shows when _continuity/STATE_*.md exists */
 .topbar-continuity {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1672,6 +1692,40 @@ select { cursor: pointer; }
 .col-d-menu button.primary { color: var(--c-success-text); font-weight: 600; }
 .col-d-menu button.primary:hover { background: var(--c-success-soft); }
 .col-d-menu .sep { height: 1px; background: var(--c-divider); margin: var(--s-2) 0; }
+
+/* ── UX-3: Page picker modal ────────────────────────────────────── */
+.pp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: var(--s-2);
+  max-height: 50vh; overflow-y: auto;
+  padding: var(--s-2) 0;
+}
+.pp-page {
+  height: 48px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-family: var(--f-mono);
+  font-size: 14px; font-weight: 600;
+  transition: all 100ms;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+}
+.pp-page:hover:not(:disabled) {
+  background: var(--c-primary-soft); border-color: var(--c-primary); color: var(--c-primary);
+}
+.pp-page.pp-any {
+  grid-column: 1 / -1;
+  background: var(--c-bg-soft); color: var(--c-text-soft);
+  font-weight: 500; font-family: var(--f-base);
+  margin-bottom: var(--s-2);
+}
+.pp-page.selected {
+  background: var(--c-primary); color: white; border-color: var(--c-primary);
+}
+.pp-page:disabled { opacity: 0.6; cursor: wait; }
 
 /* ── Phase C: Catalog edit-mode banner (top of viewport) ────────── */
 .catalog-edit-banner {
@@ -3516,6 +3570,12 @@ body[data-embedded="1"] .kbd-help { display: none; }
     <button class="topbar-context" id="topbar-context" onclick="focusSelectedRow()" title="คลิกเพื่อโฟกัส row ปัจจุบันใน tree" style="display:none">
       <span class="topbar-context-label" id="topbar-context-label"></span>
     </button>
+    <!-- UX-1: Project / company switcher — shows the currently active
+         project; click to open switcher modal -->
+    <button class="topbar-project" id="topbar-project" onclick="openProjectSwitcher()" title="เลือก project / company" style="display:none">
+      <svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg>
+      <span id="topbar-project-label">…</span>
+    </button>
     <!-- Continuity handoff badge — clickable, opens modal with full STATE.md -->
     <button class="topbar-continuity" id="topbar-continuity" onclick="openContinuityModal()" title="ดู continuity state จาก session ก่อน" style="display:none">
       <svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>
@@ -3733,6 +3793,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
       <div class="filter-row">
         <label><input type="checkbox" id="filter-flags"> มี flag</label>
         <label><input type="checkbox" id="filter-haspdf"> มี catalog</label>
+        <label title="UX-4: rows ที่ Col D ว่าง / commitment / 'ไม่พบใน catalog' — งานที่เหลือต้องทำ"><input type="checkbox" id="filter-needs-attention"> 🔴 ต้องดู</label>
         <button class="mini-btn" onclick="expandAll()" title="แตกทุก section" aria-label="expand all">⊞</button>
         <button class="mini-btn" onclick="collapseAll()" title="หุบทุก section" aria-label="collapse all">⊟</button>
       </div>
@@ -4219,6 +4280,7 @@ body[data-embedded="1"] .kbd-help { display: none; }
       <select id="catalog-section-filter" onchange="catalogReload()" style="padding:6px 10px;border:1px solid var(--c-border);border-radius:var(--r-md);font-size:var(--t-sm)">
         <option value="">All sections</option>
       </select>
+      <button class="btn" onclick="openBulkCleanup()" title="UX-2: bulk find/replace ของ brand/model/category/section"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-pencil"/></svg><span>Bulk cleanup</span></button>
       <button class="btn" onclick="catalogReingest()" title="Re-scan output/ for new PDFs"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg><span>Re-scan</span></button>
     </div>
     <div style="flex:1;overflow:hidden;display:grid;grid-template-columns: 380px 1fr;gap:0;min-height:0">
@@ -4229,6 +4291,110 @@ body[data-embedded="1"] .kbd-help { display: none; }
       <!-- RIGHT: detail -->
       <div id="catalog-detail" style="overflow-y:auto;padding:var(--s-5);min-height:0">
         <div style="padding:40px;color:var(--c-text-faint);text-align:center;font-style:italic">เลือก catalog จาก list ด้านซ้าย</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────── UX-1: Project / company switcher modal ──────────── -->
+<div class="modal-bg" id="project-switcher-modal" role="dialog" aria-modal="true" aria-labelledby="project-switcher-title" onclick="if(event.target.id==='project-switcher-modal') closeProjectSwitcher()">
+  <div class="modal" style="max-width:560px;width:96vw;max-height:85vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h3 id="project-switcher-title" style="margin:0;display:flex;align-items:center;gap:8px">
+        <svg class="ico" aria-hidden="true"><use href="#i-folder"/></svg>
+        <span>Project / Company</span>
+      </h3>
+      <button class="modal-close" onclick="closeProjectSwitcher()" aria-label="close">✕</button>
+    </div>
+    <div style="padding:var(--s-5);overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:var(--s-4)">
+      <div>
+        <h4 style="margin:0 0 var(--s-2);font-size:var(--t-xs);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-text-soft)">Active project</h4>
+        <div id="ps-active" style="padding:var(--s-3);background:var(--c-primary-soft);border:1px solid var(--c-primary);border-radius:var(--r-md);font-size:var(--t-sm)">loading…</div>
+      </div>
+      <div>
+        <h4 style="margin:0 0 var(--s-2);font-size:var(--t-xs);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-text-soft)">Switch project</h4>
+        <div id="ps-projects" style="display:flex;flex-direction:column;gap:4px;font-size:var(--t-sm)">loading…</div>
+      </div>
+      <details>
+        <summary style="cursor:pointer;font-size:var(--t-sm);color:var(--c-text-soft);font-weight:600">+ เพิ่ม company / project ใหม่</summary>
+        <div style="margin-top:var(--s-3);display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-3);border:1px dashed var(--c-border);border-radius:var(--r-md)">
+          <div>
+            <label style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">Company name + code</label>
+            <div style="display:flex;gap:6px;margin-top:4px">
+              <input type="text" id="ps-new-co-name" placeholder="Company name" style="flex:2;padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm);font-size:var(--t-sm)">
+              <input type="text" id="ps-new-co-code" placeholder="CODE" style="flex:1;padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm);font-family:var(--f-mono);font-size:var(--t-sm)">
+              <button class="btn" onclick="psAddCompany()">+ Co</button>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">Project (เลือก company → ตั้งชื่อ project)</label>
+            <div style="display:flex;gap:6px;margin-top:4px">
+              <select id="ps-new-pr-co" style="flex:1;padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm);font-size:var(--t-sm)"></select>
+              <input type="text" id="ps-new-pr-name" placeholder="Project name" style="flex:2;padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm);font-size:var(--t-sm)">
+              <input type="text" id="ps-new-pr-code" placeholder="CODE" style="flex:1;padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm);font-family:var(--f-mono);font-size:var(--t-sm)">
+              <button class="btn" onclick="psAddProject()">+ Pr</button>
+            </div>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────── UX-2: Bulk catalog cleanup modal ──────────── -->
+<div class="modal-bg" id="bulk-cleanup-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-cleanup-title" onclick="if(event.target.id==='bulk-cleanup-modal') closeBulkCleanup()">
+  <div class="modal" style="max-width:700px;width:96vw;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <h3 id="bulk-cleanup-title" style="margin:0;display:flex;align-items:center;gap:8px">
+        <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg>
+        <span>Bulk catalog cleanup</span>
+      </h3>
+      <button class="modal-close" onclick="closeBulkCleanup()" aria-label="close">✕</button>
+    </div>
+    <div style="padding:var(--s-5);overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:var(--s-3)">
+      <p style="margin:0;color:var(--c-text-soft);font-size:var(--t-sm)">
+        ค้น &amp; แทนที่ค่า field (brand / model / category / section) ใน catalogs ที่ตรงตาม pattern.
+        ตรวจ preview ก่อน apply.
+      </p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s-3)">
+        <label style="display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">Field ที่จะแก้</span>
+          <select id="bulk-field" onchange="bulkPreview()" style="font-size:var(--t-sm);padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm)">
+            <option value="brand" selected>brand</option>
+            <option value="model">model</option>
+            <option value="category">category</option>
+            <option value="section_hint">section_hint</option>
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">Match type</span>
+          <select id="bulk-match-type" onchange="bulkPreview()" style="font-size:var(--t-sm);padding:6px 8px;border:1px solid var(--c-border);border-radius:var(--r-sm)">
+            <option value="exact" selected>exact</option>
+            <option value="contains">contains</option>
+            <option value="prefix">prefix</option>
+            <option value="regex">regex</option>
+          </select>
+        </label>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">ค้นค่า (เว้นว่าง = หา rows ที่ field นี้ว่าง)</span>
+        <input type="text" id="bulk-match" placeholder="เช่น 'PoE' หรือ 'G7-' หรือเว้นว่าง" oninput="bulkPreviewDebounced()" style="font-family:var(--f-mono);font-size:var(--t-sm);padding:6px 10px;border:1px solid var(--c-border);border-radius:var(--r-sm)">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:var(--t-xs);color:var(--c-text-muted);font-weight:600">แทนที่ด้วย (เว้นว่าง = ตั้งเป็น NULL)</span>
+        <input type="text" id="bulk-new-value" placeholder="เช่น 'Lenovo' หรือเว้นว่างเพื่อล้างค่า" style="font-family:var(--f-mono);font-size:var(--t-sm);padding:6px 10px;border:1px solid var(--c-border);border-radius:var(--r-sm)">
+      </label>
+
+      <div id="bulk-preview" style="background:var(--c-bg-soft);border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-3);font-size:var(--t-xs);max-height:280px;overflow-y:auto;font-family:var(--f-mono)">
+        <div style="color:var(--c-text-faint);font-style:italic">ใส่ค่าด้านบนแล้วกด Tab เพื่อดู preview</div>
+      </div>
+
+      <div style="display:flex;gap:var(--s-2);justify-content:flex-end">
+        <button class="btn" onclick="closeBulkCleanup()">Cancel</button>
+        <button class="btn btn-primary" id="bulk-apply-btn" onclick="bulkApply()" disabled>
+          <svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>
+          <span>Apply to N records</span>
+        </button>
       </div>
     </div>
   </div>
@@ -4473,6 +4639,10 @@ function applyFilters() {
   const fVen  = document.getElementById('filter-vendor').value;
   const fFlag = document.getElementById('filter-flags').checked;
   const fPdf  = document.getElementById('filter-haspdf').checked;
+  // UX-4: "ต้องดู" filter — Col D ว่าง / "ไม่พบใน catalog" / "ยินดีปฏิบัติฯ"
+  // (= rows ที่ user ยังต้องตรวจ / ตัดสินใจ)
+  const fNeed = document.getElementById('filter-needs-attention')
+                ? document.getElementById('filter-needs-attention').checked : false;
   const status = DATA.status || {};
 
   // Detect "pure section number" query (e.g. "5.1.2") and expand its match
@@ -4489,6 +4659,18 @@ function applyFilters() {
     if (fVen && r.E !== fVen) continue;
     if (fFlag && (!r.auto_flags || !r.auto_flags.length)) continue;
     if (fPdf && !r.pdf_rel) continue;
+    // UX-4: needs-attention = empty Col D OR commitment OR "ไม่พบใน catalog"
+    // OR row that already has a verdict of need_fix (still pending)
+    if (fNeed) {
+      const d = (r.D || '').trim();
+      const verifyStatus = (status[r.row] && status[r.row].status) || 'unverified';
+      const isCommitment = d.startsWith('ยินดีปฏิบัติ');
+      const isNotFound = d.includes('ไม่พบใน catalog');
+      const isEmpty = !d;
+      const isNeedFix = verifyStatus === 'need_fix';
+      const isUnverified = verifyStatus === 'unverified' && (isCommitment || isNotFound || isEmpty);
+      if (!(isUnverified || isNeedFix)) continue;
+    }
 
     if (tokens.length) {
       const blob = ROW_BLOBS.get(r.row) || '';
@@ -7614,20 +7796,73 @@ async function catalogSaveMeta(catalog_id) {
 }
 async function catalogApplyToRow(catalog_id) {
   if (!SELECTED_ROW) { toast('Pick a row first', '', 'warn', 2500); return; }
-  const page = prompt(`หน้าใน catalog ที่ row R${SELECTED_ROW} อ้างอิง? (เว้นว่าง = ไม่ระบุหน้า)`);
-  // user cancelled
-  if (page === null) return;
-  const pageN = page.trim() ? parseInt(page) : null;
+  // Get catalog page count to populate the picker
+  let pages = 1;
+  try {
+    const r = await fetch(`/api/catalogs/${catalog_id}`);
+    const j = await r.json();
+    pages = (j.catalog && j.catalog.pages) || 1;
+  } catch (e) {}
+  // Show the page-picker modal — replaces the legacy prompt() (UX-3)
+  _openPagePicker(catalog_id, pages);
+}
+
+// UX-3: Page picker modal — replaces native prompt() for Apply-to-row.
+// Shows page-number grid (1..pages) plus "any" option.
+function _openPagePicker(catalog_id, pages) {
+  let modal = document.getElementById('page-picker-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'page-picker-modal';
+    modal.className = 'modal-bg';
+    modal.onclick = (e) => { if (e.target === modal) _closePagePicker(); };
+    document.body.appendChild(modal);
+  }
+  const buttons = [];
+  buttons.push(`<button class="pp-page pp-any" data-page="" onclick="_pickPage(${catalog_id}, null, this)">ไม่ระบุหน้า</button>`);
+  for (let i = 1; i <= pages; i++) {
+    buttons.push(`<button class="pp-page" data-page="${i}" onclick="_pickPage(${catalog_id}, ${i}, this)">${i}</button>`);
+  }
+  modal.innerHTML = `
+    <div class="modal" style="max-width:520px;width:96vw">
+      <div class="modal-head">
+        <h3 style="margin:0;display:flex;align-items:center;gap:8px">
+          <svg class="ico" aria-hidden="true"><use href="#i-file"/></svg>
+          <span>เลือกหน้าใน catalog</span>
+        </h3>
+        <button class="modal-close" onclick="_closePagePicker()" aria-label="close">✕</button>
+      </div>
+      <div style="padding:var(--s-5)">
+        <p style="margin:0 0 var(--s-3);color:var(--c-text-soft);font-size:var(--t-sm)">
+          row <strong>R${SELECTED_ROW}</strong> อ้างอิงหน้าไหนใน catalog นี้?
+          ${pages > 0 ? `<span style="color:var(--c-text-faint)">(catalog มี ${pages} หน้า)</span>` : ''}
+        </p>
+        <div class="pp-grid">${buttons.join('')}</div>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+}
+function _closePagePicker() {
+  const m = document.getElementById('page-picker-modal');
+  if (m) m.classList.remove('show');
+}
+async function _pickPage(catalog_id, page, btn) {
+  // Visual feedback
+  if (btn) {
+    btn.classList.add('selected');
+    btn.disabled = true;
+    btn.innerHTML = `${ico('refresh', 12)}<span>...</span>`;
+  }
   try {
     const r = await fetch('/api/row/apply_catalog', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({row: SELECTED_ROW, catalog_id, page: pageN}),
+      body: JSON.stringify({row: SELECTED_ROW, catalog_id, page}),
     });
     const j = await r.json();
     if (j.ok) {
       toast(`✓ Applied`, `R${SELECTED_ROW} → ${(j.col_d || '').slice(0, 40)}`, 'learn', 4000);
+      _closePagePicker();
       closeCatalogBrowser();
-      // Refresh xlsx + tree to show new Col D
       if (typeof loadXlsx === 'function' && SELECTED_ROW) loadXlsx(SELECTED_ROW);
       const idx = await fetch('/api/index').then(r => r.json());
       DATA = idx;
@@ -7636,8 +7871,12 @@ async function catalogApplyToRow(catalog_id) {
       if (typeof tickRetrain === 'function') tickRetrain('apply_catalog');
     } else {
       toast('Apply failed', j.error || 'unknown', 'error', 4500);
+      if (btn) { btn.disabled = false; btn.innerHTML = page === null ? 'ไม่ระบุหน้า' : String(page); btn.classList.remove('selected'); }
     }
-  } catch (e) { toast('Apply error', e.message, 'error', 4500); }
+  } catch (e) {
+    toast('Apply error', e.message, 'error', 4500);
+    if (btn) { btn.disabled = false; btn.innerHTML = page === null ? 'ไม่ระบุหน้า' : String(page); btn.classList.remove('selected'); }
+  }
 }
 async function catalogDeleteAnnot(catalog_id, annot_id) {
   if (!confirm(`Delete annotation #${annot_id}?`)) return;
@@ -7905,6 +8144,227 @@ async function exportLoadRecent() {
   } catch (e) { box.innerHTML = `<span style="color:var(--c-danger-text)">${escapeHtml(e.message)}</span>`; }
 }
 
+// ── UX-1: Multi-company / project switcher ─────────────────────
+async function loadProjectSwitcherBadge() {
+  try {
+    const r = await fetch('/api/projects');
+    const j = await r.json();
+    const badge = document.getElementById('topbar-project');
+    const label = document.getElementById('topbar-project-label');
+    if (!badge || !label) return;
+    if (j.active) {
+      badge.style.display = '';
+      const co = j.active.company_code || j.active.company_name || '';
+      const pr = j.active.code || j.active.name || '';
+      label.textContent = `${co} · ${pr}`;
+      badge.title = `${j.active.company_name} → ${j.active.name} · ${(j.items || []).length} project(s) total`;
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { /* silent */ }
+}
+async function openProjectSwitcher() {
+  document.getElementById('project-switcher-modal').classList.add('show');
+  await psRefresh();
+}
+function closeProjectSwitcher() {
+  document.getElementById('project-switcher-modal').classList.remove('show');
+}
+async function psRefresh() {
+  // Active
+  const active = document.getElementById('ps-active');
+  const projs = document.getElementById('ps-projects');
+  active.textContent = 'loading…';
+  projs.textContent = 'loading…';
+  try {
+    const [pr, co] = await Promise.all([
+      fetch('/api/projects').then(r => r.json()),
+      fetch('/api/companies').then(r => r.json()),
+    ]);
+    if (pr.active) {
+      active.innerHTML = `
+        <div style="font-weight:600">${escapeHtml(pr.active.name || '?')}</div>
+        <div style="color:var(--c-text-soft);margin-top:2px">${escapeHtml(pr.active.company_name || '')} · ${escapeHtml(pr.active.code || '—')}</div>
+        <div style="color:var(--c-text-faint);font-size:var(--t-xs);margin-top:6px;font-family:var(--f-mono)">xlsx: ${escapeHtml(pr.active.xlsx_rel || '?')}</div>
+      `;
+    } else {
+      active.innerHTML = '<span style="color:var(--c-text-faint)">No active project</span>';
+    }
+    const items = pr.items || [];
+    if (!items.length) {
+      projs.innerHTML = '<span style="color:var(--c-text-faint)">no projects yet</span>';
+    } else {
+      projs.innerHTML = items.map(p => {
+        const isActive = pr.active && p.project_id === pr.active.project_id;
+        return `<button class="ps-project-row${isActive ? ' active' : ''}" onclick="psActivate(${p.project_id})" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--c-border);border-radius:var(--r-sm);background:${isActive ? 'var(--c-primary-soft)' : 'var(--c-surface)'};color:var(--c-text);text-align:left;cursor:pointer">
+          <span style="flex:1">
+            <strong>${escapeHtml(p.name)}</strong>
+            <span style="color:var(--c-text-soft);font-size:var(--t-xs);margin-left:6px">${escapeHtml(p.company_name)} · ${escapeHtml(p.code || '—')}</span>
+          </span>
+          ${isActive ? '<span style="background:var(--c-primary);color:white;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600">ACTIVE</span>' : '<span style="color:var(--c-text-faint);font-size:var(--t-xs)">click to activate</span>'}
+        </button>`;
+      }).join('');
+    }
+    // Populate company dropdown for new project
+    const psCo = document.getElementById('ps-new-pr-co');
+    if (psCo) {
+      psCo.innerHTML = (co.items || []).map(c =>
+        `<option value="${c.company_id}">${escapeHtml(c.name)} (${escapeHtml(c.code || '—')})</option>`).join('');
+    }
+  } catch (e) {
+    active.innerHTML = `<span style="color:var(--c-danger-text)">error: ${escapeHtml(e.message)}</span>`;
+  }
+}
+async function psActivate(project_id) {
+  try {
+    const r = await fetch(`/api/projects/${project_id}/activate`, {method: 'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Switched project', j.active?.name || '', 'learn', 3000);
+      psRefresh();
+      loadProjectSwitcherBadge();
+      // Note: catalog ingest doesn't auto-rerun on switch — tell user
+      toast('ℹ Restart GUI', 'restart launcher to re-ingest output/ for the new project', 'info', 5000);
+    } else {
+      toast('Switch failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) { toast('Switch error', e.message, 'error', 4000); }
+}
+async function psAddCompany() {
+  const name = document.getElementById('ps-new-co-name').value.trim();
+  const code = document.getElementById('ps-new-co-code').value.trim();
+  if (!name) { toast('Name required', '', 'warn', 2500); return; }
+  try {
+    const r = await fetch('/api/companies', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, code: code || null}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Company added', `id=${j.company_id}`, 'learn', 2500);
+      document.getElementById('ps-new-co-name').value = '';
+      document.getElementById('ps-new-co-code').value = '';
+      psRefresh();
+    } else { toast('Add failed', j.error, 'error', 3500); }
+  } catch (e) { toast('Add error', e.message, 'error', 3500); }
+}
+async function psAddProject() {
+  const co = document.getElementById('ps-new-pr-co').value;
+  const name = document.getElementById('ps-new-pr-name').value.trim();
+  const code = document.getElementById('ps-new-pr-code').value.trim();
+  if (!co || !name) { toast('Company + name required', '', 'warn', 2500); return; }
+  try {
+    const r = await fetch('/api/projects', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({company_id: parseInt(co), name, code: code || null}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Project added', `id=${j.project_id}`, 'learn', 2500);
+      document.getElementById('ps-new-pr-name').value = '';
+      document.getElementById('ps-new-pr-code').value = '';
+      psRefresh();
+    } else { toast('Add failed', j.error, 'error', 3500); }
+  } catch (e) { toast('Add error', e.message, 'error', 3500); }
+}
+loadProjectSwitcherBadge();
+setInterval(loadProjectSwitcherBadge, 60000);
+
+// ── UX-2: Bulk catalog cleanup ──────────────────────────────────
+let _BULK_TIMER = 0;
+let _BULK_MATCHED = 0;
+function openBulkCleanup() {
+  document.getElementById('bulk-cleanup-modal').classList.add('show');
+  // Pre-fill: if user filtered by brand earlier, suggest empty-brand cleanup
+  document.getElementById('bulk-match').value = '';
+  document.getElementById('bulk-new-value').value = '';
+  bulkPreview();
+}
+function closeBulkCleanup() {
+  document.getElementById('bulk-cleanup-modal').classList.remove('show');
+}
+function bulkPreviewDebounced() {
+  if (_BULK_TIMER) clearTimeout(_BULK_TIMER);
+  _BULK_TIMER = setTimeout(bulkPreview, 200);
+}
+async function bulkPreview() {
+  const params = new URLSearchParams({
+    field: document.getElementById('bulk-field').value,
+    match_type: document.getElementById('bulk-match-type').value,
+    match: document.getElementById('bulk-match').value,
+    limit: '50',
+  });
+  const box = document.getElementById('bulk-preview');
+  const btn = document.getElementById('bulk-apply-btn');
+  box.innerHTML = '<div style="color:var(--c-text-faint)">loading…</div>';
+  try {
+    const r = await fetch(`/api/catalogs/bulk_preview?${params}`);
+    const j = await r.json();
+    if (!j.ok) {
+      box.innerHTML = `<div style="color:var(--c-danger-text)">${escapeHtml(j.error)}</div>`;
+      btn.disabled = true; btn.querySelector('span').textContent = 'Apply to 0 records';
+      return;
+    }
+    _BULK_MATCHED = j.count;
+    if (!j.count) {
+      box.innerHTML = '<div style="color:var(--c-text-faint)">ไม่พบ catalog ที่ตรงกับ pattern</div>';
+      btn.disabled = true; btn.querySelector('span').textContent = 'Apply to 0 records';
+      return;
+    }
+    const field = document.getElementById('bulk-field').value;
+    box.innerHTML = `
+      <div style="margin-bottom:6px;font-weight:600;color:var(--c-text)">${j.count} catalogs จะถูกแก้:</div>
+      ${j.items.slice(0, 30).map(c => `
+        <div style="display:grid;grid-template-columns:60px 1fr;gap:6px;padding:2px 0;font-size:11px">
+          <span style="color:var(--c-text-faint)">#${c.catalog_id}</span>
+          <span style="color:var(--c-text-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            <strong>${escapeHtml(c[field] || '∅')}</strong> · ${escapeHtml(c.section_hint || '')} · ${escapeHtml((c.pdf_rel || '').split('/').pop().slice(0, 50))}
+          </span>
+        </div>`).join('')}
+      ${j.count > 30 ? `<div style="color:var(--c-text-faint);margin-top:4px">…และอีก ${j.count - 30} รายการ</div>` : ''}
+    `;
+    btn.disabled = false;
+    btn.querySelector('span').textContent = `Apply to ${j.count} record${j.count === 1 ? '' : 's'}`;
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--c-danger-text)">${escapeHtml(e.message)}</div>`;
+    btn.disabled = true;
+  }
+}
+async function bulkApply() {
+  if (!_BULK_MATCHED) return;
+  const newVal = document.getElementById('bulk-new-value').value.trim();
+  const matchVal = document.getElementById('bulk-match').value;
+  const field = document.getElementById('bulk-field').value;
+  if (!confirm(`Apply to ${_BULK_MATCHED} catalogs?\n\nfield: ${field}\nmatch: ${matchVal || '(empty)'}\nnew value: ${newVal || '(NULL)'}\n\nThis cannot be undone via UI (use snapshot to restore).`)) return;
+  const btn = document.getElementById('bulk-apply-btn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `${ico('refresh', 14)}<span>Updating…</span>`;
+  try {
+    const r = await fetch('/api/catalogs/bulk_update', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        field,
+        match: matchVal,
+        match_type: document.getElementById('bulk-match-type').value,
+        new_value: newVal || null,
+      }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('✓ Bulk update done', `${j.updated} catalogs updated`, 'learn', 4500);
+      closeBulkCleanup();
+      catalogReload();
+    } else {
+      toast('Bulk failed', j.error || 'unknown', 'error', 5000);
+      btn.disabled = false; btn.innerHTML = orig;
+    }
+  } catch (e) {
+    toast('Bulk error', e.message, 'error', 5000);
+    btn.disabled = false; btn.innerHTML = orig;
+  }
+}
+
 async function catalogReingest() {
   toast('Re-scanning…', 'reading output/ for new PDFs', 'info', 2000);
   try {
@@ -8060,9 +8520,12 @@ function confDotHtml(r) {
 }
 
 // ── filter wiring ──────────────────────────────────────────────
-['tree-search','filter-status','filter-vendor','filter-flags','filter-haspdf'].forEach(id => {
-  document.getElementById(id).addEventListener('input', applyFilters);
-  document.getElementById(id).addEventListener('change', applyFilters);
+['tree-search','filter-status','filter-vendor','filter-flags','filter-haspdf',
+ 'filter-needs-attention'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', applyFilters);
+  el.addEventListener('change', applyFilters);
 });
 
 // ── Keyboard ───────────────────────────────────────────────────

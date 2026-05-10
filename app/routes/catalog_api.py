@@ -65,6 +65,59 @@ def links(catalog_id: int):
                     "links": catalog.list_links_for_catalog(catalog_id)})
 
 
+# UX-2: bulk metadata cleanup ─────────────────────────────────────────
+
+@bp.route("/api/catalogs/bulk_preview")
+def bulk_preview():
+    """Preview which catalogs would be matched by a bulk update.
+
+    Query params:
+      match=<value>         the value to search for (or "" for empty)
+      match_type=exact|contains|prefix|regex   (default exact)
+      field=brand|model|category|section_hint  (default brand)
+      limit=N               (default 50)
+    """
+    try:
+        items = catalog.bulk_match_preview(
+            match=request.args.get("match", ""),
+            match_type=request.args.get("match_type", "exact"),
+            field=request.args.get("field", "brand"),
+            limit=int(request.args.get("limit", 50)),
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "items": items, "count": len(items)})
+
+
+@bp.route("/api/catalogs/bulk_update", methods=["POST"])
+def bulk_update():
+    """Apply bulk update.
+
+    Body: {match, match_type, field, new_value}
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        result = catalog.bulk_update_brand(
+            match=data.get("match", ""),
+            match_type=data.get("match_type", "exact"),
+            only_field=data.get("field", "brand"),
+            new_brand=data.get("new_value"),
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    db.log_audit(action="catalog_bulk_update", target_type="catalog",
+                 target_id=str(result["updated"]),
+                 details={
+                     "match": data.get("match", ""),
+                     "match_type": data.get("match_type", "exact"),
+                     "field": data.get("field", "brand"),
+                     "new_value": data.get("new_value"),
+                     "matched_ids": result["ids"][:50],
+                 },
+                 actor="user")
+    return jsonify({"ok": True, **result})
+
+
 @bp.route("/api/catalogs/reingest", methods=["POST"])
 def reingest():
     force = request.args.get("force") == "1"
