@@ -56,6 +56,25 @@ from app import core
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "output"
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader so we don't pull in python-dotenv as a dep.
+    Lines like KEY=value (no quotes needed). Skips comments + blanks.
+    Existing env vars take precedence (so shell exports win)."""
+    if not path.exists():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            os.environ.setdefault(k, v)
+    except Exception as e:
+        sys.stderr.write(f"[_load_dotenv] {e}\n")
+
 # Layout detection — supports both:
 #   1. comply-module/ layout (current): TOR, BOQ, scripts, _versions sit
 #      alongside comply_verify_gui.py (PROJECT == ROOT)
@@ -2148,6 +2167,22 @@ def api_pdf_page():
     dpi = int(request.args.get("dpi", 130))
     highlight = request.args.get("highlight")
     edit_mode = request.args.get("edit") == "1"
+    # WYSIWYG: even in edit mode we bake annots into the rendered image so
+    # the user sees the SAME thing they'd see in preview (yellow header
+    # banners, custom-appearance labels, etc.). The SVG overlay only adds
+    # invisible hit areas + handles for selected annots, plus visible
+    # rect/text for newly-drawn (unsaved) ones. Suppressing annots
+    # altogether (the old behaviour) made edit-mode look totally different
+    # from preview because PyMuPDF's appearance streams (/AP) — including
+    # backgrounds and custom fonts — were stripped.
+    # An explicit ?bake=0 still forces stripping (used by the wizard when
+    # actively editing existing annots so the user doesn't see ghost
+    # copies during drag).
+    bake_param = request.args.get("bake")
+    if bake_param == "0":
+        no_annots = True
+    else:
+        no_annots = False
     if not rel:
         abort(400, "rel required")
     p = (OUTPUT / rel).resolve()
@@ -2157,7 +2192,7 @@ def api_pdf_page():
         abort(404)
     png, info = render_pdf_page_png(p, page, dpi=dpi,
                                     highlight=highlight,
-                                    no_annots=edit_mode)
+                                    no_annots=no_annots)
     resp = send_file(io.BytesIO(png), mimetype="image/png")
     if info.get("y0") is not None:
         resp.headers["X-Highlight-Y0"] = f"{info['y0']:.0f}"
@@ -2832,6 +2867,8 @@ def auto_annotate_plan(row_num: int) -> dict:
             role="section_header", has_match=bool(plan["proposed_d"]),
             warnings=len(plan["warnings"]),
         )
+        # Claude refinement for section headers (brand/model decomposition)
+        plan = _maybe_refine_with_claude(plan, row, role_info)
         return plan
 
     if role in ("item", "sub_item"):
@@ -2844,6 +2881,8 @@ def auto_annotate_plan(row_num: int) -> dict:
                 generator=plan["generator"], provenance=plan["provenance"],
                 role=role, has_match=False, warnings=len(plan["warnings"]),
             )
+            # Claude refinement — text search missed but Claude may know better
+            plan = _maybe_refine_with_claude(plan, row, role_info)
             return plan
         page = match["page"]
         plan["match"] = match
@@ -2874,12 +2913,200 @@ def auto_annotate_plan(row_num: int) -> dict:
             generator=plan["generator"], provenance=plan["provenance"],
             role=role, has_match=True, warnings=len(plan["warnings"]),
         )
+        # Claude refinement (if installed)
+        plan = _maybe_refine_with_claude(plan, row, role_info)
         return plan
 
     plan["warnings"].append(f"row role '{role}' — ไม่รองรับการ auto-annotate")
     plan["ok"] = False
     plan["confidence"] = 0.0
     return plan
+
+
+def _maybe_refine_with_claude(plan: dict, row: dict, role_info: dict) -> dict:
+    """If a Claude provider is installed AND the rule-based plan has low
+    confidence, ask Claude for a structured proposal and merge into the plan.
+
+    Strategy:
+      • plan.confidence ≥ 0.85 → keep rules (no spend)
+      • plan.confidence < 0.85 → ask Claude, override col_d/col_c if Claude
+        returns a propose_col_d tool call with higher confidence
+      • Always record the Claude call's audit for analytics
+
+    Failure modes are non-fatal — Claude errors fall through to rule output.
+    """
+    try:
+        from app import anthropic_provider as ap
+    except Exception:
+        return plan
+
+    provider = ap.get_provider()
+    if provider is None:
+        return plan
+
+    if plan.get("confidence", 0) >= 0.85:
+        # rules already confident — skip the spend
+        plan["llm"] = {"skipped": "high_confidence_rules"}
+        return plan
+
+    # Find a few similar past corrections for in-context learning
+    few_shot: list[dict] = []
+    try:
+        few_shot = _claude_few_shot_for(row, role_info, limit=4)
+    except Exception as e:
+        sys.stderr.write(f"[claude-refine] few_shot failed: {e}\n")
+
+    row_context = {
+        "row": row.get("row"),
+        "section": row.get("section_inferred"),
+        "role": role_info.get("role"),
+        "col_a": row.get("A"),
+        "col_b": row.get("B") or "",
+        "col_c_current": row.get("C") or "",
+        "col_d_current": row.get("D") or "",
+        "col_e": row.get("E") or "",
+        "pdf_rel": row.get("pdf_rel"),
+        "pdf_filename": Path(row["pdf_rel"]).name if row.get("pdf_rel") else None,
+        "tor_excerpt": _claude_tor_excerpt(row),
+        "rule_proposal": {
+            "proposed_d": plan.get("proposed_d", ""),
+            "generator": plan.get("generator", "rules"),
+            "confidence": plan.get("confidence", 0),
+        },
+        "_few_shot": few_shot,
+    }
+
+    try:
+        result = provider.propose(row_context=row_context, few_shot=few_shot)
+    except ap.BudgetExceededError as e:
+        plan["llm"] = {"error": "budget_exceeded", "msg": str(e)}
+        plan["warnings"].append(f"Claude skipped: {e}")
+        return plan
+    except Exception as e:
+        plan["llm"] = {"error": str(e)}
+        sys.stderr.write(f"[claude-refine] {e}\n")
+        return plan
+
+    if not result.get("ok"):
+        plan["llm"] = {"error": result.get("error", "unknown")}
+        return plan
+
+    # Merge Claude's proposal into plan
+    plan["llm"] = {
+        "model": result.get("model"),
+        "tokens": result.get("usage"),
+        "cost_usd": round(result.get("cost_usd", 0), 6),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "tool_calls": result.get("tool_calls", []),
+        "rationale": "",
+        "claude_confidence": 0.0,
+        "escalation": None,
+    }
+
+    for tc in result.get("tool_calls", []):
+        name = tc.get("name")
+        inp = tc.get("input", {}) or {}
+        if name == "propose_col_d":
+            claude_d = (inp.get("col_d_text") or "").strip()
+            claude_c = (inp.get("col_c_proposed") or "").strip()
+            claude_conf = float(inp.get("confidence", 0))
+            plan["llm"]["rationale"] = inp.get("rationale", "")
+            plan["llm"]["claude_confidence"] = claude_conf
+            plan["llm"]["pattern"] = inp.get("pattern", "")
+            # Override only if Claude's confidence beats the rule
+            if claude_d and claude_conf > plan.get("confidence", 0):
+                plan["proposed_d"] = claude_d
+                plan["generator"] = f"claude+{plan.get('generator', 'rules')}"
+                plan["confidence"] = max(plan.get("confidence", 0), claude_conf)
+                plan["provenance"] = {
+                    **plan.get("provenance", {}),
+                    "claude_pattern": inp.get("pattern", ""),
+                    "claude_rationale": inp.get("rationale", ""),
+                }
+                if claude_c:
+                    plan["proposed_c"] = claude_c
+                if inp.get("page_in_catalog"):
+                    plan["claude_page"] = int(inp["page_in_catalog"])
+        elif name == "propose_brand_model":
+            brand = (inp.get("brand") or "").strip()
+            model = (inp.get("model") or "").strip()
+            if brand and brand != "-" and model:
+                # For section_header rows, override Col D with Claude's brand+model
+                claude_d = f"ยี่ห้อ {brand} รุ่น {model}"
+                if float(inp.get("confidence", 0)) > plan.get("confidence", 0):
+                    plan["proposed_d"] = claude_d
+                    plan["generator"] = "claude+brand_model"
+                    plan["confidence"] = float(inp.get("confidence", 0))
+                    plan["provenance"]["claude_brand"] = brand
+                    plan["provenance"]["claude_model"] = model
+            elif brand == "-" and model:
+                plan["proposed_d"] = f"ยี่ห้อ - รุ่น {model}"
+                plan["generator"] = "claude+brand_model_fabricate"
+                plan["confidence"] = float(inp.get("confidence", 0))
+            plan["llm"]["rationale"] = inp.get("rationale", "")
+            plan["llm"]["claude_confidence"] = float(inp.get("confidence", 0))
+        elif name == "escalate_to_user":
+            plan["llm"]["escalation"] = {
+                "question": inp.get("question", ""),
+                "options": inp.get("options", []),
+                "context": inp.get("context", ""),
+            }
+            plan["warnings"].append(
+                f"Claude escalated: {inp.get('question', '')[:100]}"
+            )
+
+    return plan
+
+
+def _claude_few_shot_for(row: dict, role_info: dict, limit: int = 4) -> list[dict]:
+    """Pull the most-similar past corrections from learning_feedback to use
+    as in-context examples. Heuristic: same section root + same role +
+    user_action='edited' (i.e. the user actually fixed something useful)."""
+    section = row.get("section_inferred") or ""
+    sec_root = ".".join(section.split(".")[:2]) if section else ""
+    role = role_info.get("role") or ""
+    out: list[dict] = []
+    try:
+        with db.conn() as c:
+            rows = c.execute(
+                """SELECT input_b, final_d, generator, correction_kind
+                   FROM learning_feedback
+                   WHERE user_action = 'edited'
+                     AND section LIKE ?
+                     AND input_role = ?
+                   ORDER BY ts DESC LIMIT ?""",
+                (sec_root + ".%", role, limit),
+            ).fetchall()
+            for r in rows:
+                out.append({
+                    "input_b": r["input_b"],
+                    "final_d": r["final_d"],
+                    "generator": r["generator"],
+                    "correction_kind": r["correction_kind"],
+                })
+    except Exception as e:
+        sys.stderr.write(f"[claude-fewshot] {e}\n")
+    return out
+
+
+def _claude_tor_excerpt(row: dict, max_chars: int = 800) -> str:
+    """Pull the TOR text snippet for the row's section, if available."""
+    try:
+        section = row.get("section_inferred") or ""
+        if not section:
+            return ""
+        with db.conn() as c:
+            r = c.execute(
+                """SELECT page_text FROM tor_pages
+                   JOIN tor_sections ON tor_sections.page_num = tor_pages.page_num
+                   WHERE tor_sections.section = ? LIMIT 1""",
+                (section,),
+            ).fetchone()
+            if r and r["page_text"]:
+                return r["page_text"][:max_chars]
+    except Exception:
+        pass
+    return ""
 
 
 def apply_auto_annotate_plan(plan: dict, write_pdf: bool = True,
@@ -4099,8 +4326,15 @@ def boot_sync_check() -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_pdf_records_for_db() -> list[dict]:
-    """Snapshot the PDF index + their annotations into dict records that can
-    go straight into the DB."""
+    """Snapshot the PDF index into dict records for the DB.
+
+    Annotations are NOT pre-listed — they used to be (via list_pdf_annots
+    per PDF), which made boot ~60-90 sec on Google Drive filesystems
+    because PyMuPDF opens each of 101 PDFs and walks every annot. The
+    pdf_annotations table is only ever WRITTEN (and counted), never
+    queried — annotations are fetched live via /api/pdf_meta when a row
+    is selected. Keeping it empty saves ~minute on every boot.
+    """
     seen: dict[Path, dict] = {}
     # Combine both indexes
     for ref_key, paths in PDF_INDEX.items():
@@ -4121,32 +4355,21 @@ def _build_pdf_records_for_db() -> list[dict]:
             rel = str(p.relative_to(OUTPUT))
         except Exception:
             continue
-        # Try detect brand/model from filename
+        # Try detect brand/model from filename (fast, no PDF open)
         try:
             brand, model = parse_brand_model_from_filename(p.stem)
         except Exception:
             brand, model = ("", "")
-        # Annotations
-        annots = []
-        try:
-            annots = list_pdf_annots(p)
-        except Exception:
-            pass
-        try:
-            doc = fitz.open(p)
-            n_pages = len(doc)
-        except Exception:
-            n_pages = None
         records.append({
             "rel_path": rel,
             "folder_key": meta.get("folder_key"),
             "section_prefix": meta.get("section_prefix"),
             "size": stat.st_size,
             "mtime": stat.st_mtime,
-            "num_pages": n_pages,
+            "num_pages": None,        # filled lazily via /api/pdf_meta
             "brand": brand or None,
             "model": model or None,
-            "annotations": annots,
+            "annotations": [],         # empty — see docstring
         })
     return records
 
@@ -4347,10 +4570,141 @@ def _upsert_pattern(c, ptype, trigger, trigger_extra, value,
         )
 
 
+@app.route("/api/settings/api_key", methods=["POST"])
+def api_settings_save_api_key():
+    """Save the Anthropic API key from the frontend.
+
+    The key is written to ROOT/.env (gitignored), the Anthropic provider
+    singleton is reset, and we reinstall it into the learning hook so
+    subsequent auto-annotate calls go through Claude immediately — no
+    restart needed.
+    """
+    data = request.get_json(silent=True) or {}
+    key = (data.get("api_key") or "").strip()
+    model = (data.get("model") or "").strip()
+    budget = data.get("budget_usd_per_day")
+
+    if key and not key.startswith("sk-ant-"):
+        return jsonify({"ok": False, "error": "API key must start with 'sk-ant-'"}), 400
+
+    env_path = ROOT / ".env"
+    # Read existing .env (if present) and replace/append the keys
+    lines: list[str] = []
+    have = {"ANTHROPIC_API_KEY": False, "COMPLY_LLM": False,
+            "COMPLY_LLM_MODEL": False, "COMPLY_LLM_BUDGET_USD_PER_DAY": False}
+    try:
+        if env_path.exists():
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                stripped = raw.strip()
+                if stripped.startswith("#") or "=" not in stripped:
+                    lines.append(raw); continue
+                k = stripped.split("=", 1)[0].strip()
+                if k == "ANTHROPIC_API_KEY":
+                    if key:
+                        lines.append(f"ANTHROPIC_API_KEY={key}")
+                        have[k] = True
+                    # else: drop the line (user cleared the key)
+                elif k == "COMPLY_LLM":
+                    lines.append("COMPLY_LLM=anthropic" if key else "COMPLY_LLM=")
+                    have[k] = True
+                elif k == "COMPLY_LLM_MODEL":
+                    if model:
+                        lines.append(f"COMPLY_LLM_MODEL={model}"); have[k] = True
+                    else:
+                        lines.append(raw); have[k] = True
+                elif k == "COMPLY_LLM_BUDGET_USD_PER_DAY":
+                    if budget is not None:
+                        lines.append(f"COMPLY_LLM_BUDGET_USD_PER_DAY={float(budget):.2f}")
+                        have[k] = True
+                    else:
+                        lines.append(raw); have[k] = True
+                else:
+                    lines.append(raw)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to read .env: {e}"}), 500
+
+    # Append any missing keys
+    if key and not have["ANTHROPIC_API_KEY"]:
+        lines.append(f"ANTHROPIC_API_KEY={key}")
+    if not have["COMPLY_LLM"]:
+        lines.append("COMPLY_LLM=anthropic" if key else "COMPLY_LLM=")
+    if not have["COMPLY_LLM_MODEL"] and model:
+        lines.append(f"COMPLY_LLM_MODEL={model}")
+    if not have["COMPLY_LLM_BUDGET_USD_PER_DAY"] and budget is not None:
+        lines.append(f"COMPLY_LLM_BUDGET_USD_PER_DAY={float(budget):.2f}")
+
+    # Write back atomically
+    try:
+        tmp = env_path.with_suffix(".env.tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(env_path)
+        # Also restrict perms (key is sensitive)
+        try: env_path.chmod(0o600)
+        except Exception: pass
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to write .env: {e}"}), 500
+
+    # Live-reload env vars + provider
+    if key:
+        os.environ["ANTHROPIC_API_KEY"] = key
+        os.environ["COMPLY_LLM"] = "anthropic"
+        if model: os.environ["COMPLY_LLM_MODEL"] = model
+        if budget is not None: os.environ["COMPLY_LLM_BUDGET_USD_PER_DAY"] = str(float(budget))
+    else:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ["COMPLY_LLM"] = ""
+
+    # Reset and reinstall the provider singleton
+    try:
+        from app import anthropic_provider as ap
+        ap._provider = None
+        installed = ap.install_into_learning() if key else False
+        status = ap.get_provider().budget_status() if installed else {"available": False}
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"provider init: {e}"}), 500
+
+    try:
+        db.log_audit(action="set_api_key", target_type="settings",
+                     details={"model": model, "budget": budget,
+                              "cleared": not bool(key)},
+                     actor="user")
+    except Exception: pass
+
+    return jsonify({"ok": True, "installed": bool(key) and installed,
+                    "status": status})
+
+
 @app.route("/api/learn/llm_status")
 def api_learn_llm_status():
-    """LLM provider info (Sprint S3 — surfaced in Settings)."""
-    return jsonify(learning.llm_status())
+    """LLM provider info + budget snapshot (Sprint S3 — surfaced in Settings)."""
+    base = learning.llm_status()
+    try:
+        from app import anthropic_provider as ap
+        p = ap.get_provider()
+        if p:
+            base.update(p.budget_status())
+            # Today's call count + last call info
+            with db.conn() as c:
+                row = c.execute(
+                    """SELECT COUNT(*) AS n,
+                              COALESCE(SUM(input_tokens),0) AS in_tok,
+                              COALESCE(SUM(output_tokens),0) AS out_tok,
+                              COALESCE(SUM(cache_read_tokens),0) AS cache_read,
+                              COALESCE(MAX(ts),'') AS last_ts
+                       FROM llm_calls
+                       WHERE substr(ts, 1, 10) = strftime('%Y-%m-%d', 'now')""",
+                ).fetchone()
+                if row:
+                    base.update({
+                        "calls_today": row["n"],
+                        "tokens_in_today": row["in_tok"],
+                        "tokens_out_today": row["out_tok"],
+                        "tokens_cache_read_today": row["cache_read"],
+                        "last_call_ts": row["last_ts"],
+                    })
+    except Exception as e:
+        base["error"] = str(e)
+    return jsonify(base)
 
 
 @app.route("/api/learn/feedback", methods=["POST"])
@@ -4655,7 +5009,14 @@ INDEX_HTML = r"""<!doctype html>
 
 /* ── Reset ──────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; height: 100%; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  overflow: hidden;             /* lock page scroll on BOTH — prevents
+                                   scrollIntoView() from cascading up to
+                                   the document, which would push the
+                                   topbar off-screen on row navigation */
+  overscroll-behavior: none;    /* no rubber-band on macOS trackpad */
+}
 html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-size-adjust: 100%; }
 body {
   font-family: var(--f-sans);
@@ -4663,7 +5024,6 @@ body {
   line-height: var(--lh-normal);
   color: var(--c-text);
   background: var(--c-bg);
-  overflow: hidden;
 }
 button, input, select, textarea { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -4749,16 +5109,31 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 
 /* ── App shell ──────────────────────────────────────────────────── */
+/* The --safe-top variable absorbs any host-app/browser-extension chrome
+   that overlays the top of the viewport (Claude Preview MCP toolbar,
+   browser translate bars, etc.). Default 0 for normal browser use; auto
+   bumped to 56px when running inside an iframe (data-embedded), user
+   can override exactly via Settings → "Top inset" slider (sets an
+   inline style on body which beats this rule). */
+:root { --safe-top: 0px; }
+body[data-embedded="1"] { --safe-top: 56px; }
+
 #app {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr auto;
+  grid-template-rows: var(--safe-top) var(--topbar-h) 1fr auto;
   grid-template-columns: minmax(var(--tree-w-md), var(--tree-w)) 1fr 1fr;
   grid-template-areas:
-    "topbar topbar topbar"
-    "tree   center pdf"
-    "action action action";
+    "safetop safetop safetop"
+    "topbar  topbar  topbar"
+    "tree    center  pdf"
+    "action  action  action";
   height: 100vh;
   background: var(--c-bg);
+}
+#app::before {
+  content: '';
+  grid-area: safetop;
+  background: var(--c-bg);    /* match app bg so the gap is invisible */
 }
 #app > .action-bar { grid-area: action; }
 #app.has-sync-banner { padding-top: 32px; }
@@ -5429,32 +5804,35 @@ select { cursor: pointer; }
 .pdf-overlay.editable { pointer-events: all; }
 .pdf-overlay g.annot { pointer-events: all; cursor: pointer; }
 .pdf-overlay g.annot.selected { cursor: move; }
-/* Annotation rendering — must match what apply_pdf_edits writes to disk
-   so edit-mode preview === saved PDF. Stroke 1pt red solid for both
-   Square and FreeText (PyMuPDF border_color=(1,0,0), set_border(width=1)). */
+/* Annotation rendering — fully WYSIWYG with preview.
+   The PDF page is now rendered WITH annots baked in (same as preview),
+   so SVG ann-rect is TRANSPARENT for existing annots. We only paint
+   visible borders for:
+     • NEWLY drawn (unsaved) annots — class .is-new
+     • Currently SELECTED annot — class .selected (warn-orange handles)
+   Both cases show on top of the baked image as overlays. */
 .pdf-overlay rect.ann-rect {
   fill: transparent;
+  stroke: none;                          /* transparent by default */
+}
+/* Newly drawn annot — show red border so user knows it's there
+   (the saved PDF won't have it baked yet) */
+.pdf-overlay g.annot.is-new rect.ann-rect {
   stroke: rgb(255, 0, 0);
   stroke-width: 1;
-  vector-effect: non-scaling-stroke;
 }
-.pdf-overlay rect.ann-rect.freetext {
-  /* PyMuPDF FreeText has no border by default (border_color requires
-     rich_text). To stay WYSIWYG with the saved PDF we draw a faint
-     dotted outline ONLY in edit mode (so the user can still grab the
-     label rect to resize) — view mode picks up the saved-PDF render
-     which has no border. */
-  fill: transparent;
-  stroke: rgba(255, 0, 0, 0.25);
-  stroke-width: 0.5;
-  stroke-dasharray: 1 2;
+.pdf-overlay g.annot.is-new rect.ann-rect.freetext {
+  stroke: none;     /* FreeText label rect has no border in saved PDF either */
+}
+/* Selected — warn-orange highlight on top of whatever's there */
+.pdf-overlay g.annot.selected rect.ann-rect {
+  stroke: var(--c-warn);
+  stroke-width: 2;
 }
 .pdf-overlay g.annot.selected rect.ann-rect.freetext {
   stroke: var(--c-warn);
   stroke-width: 1.5;
-  stroke-dasharray: none;
 }
-.pdf-overlay g.annot.selected rect.ann-rect { stroke: var(--c-warn); stroke-width: 2; }
 .pdf-overlay text.ann-text {
   fill: rgb(255, 0, 0);
   /* Helvetica family — closest to PyMuPDF's "helv" rendered glyphs */
@@ -5874,6 +6252,47 @@ select { cursor: pointer; }
   transition: color var(--d-fast) var(--ease-std), background var(--d-fast) var(--ease-std);
 }
 .ab-bottom .reset-btn:hover { color: var(--c-text); background: var(--c-surface-2); }
+
+/* ── Floating actions (bottom-LEFT, always visible) ──────────────
+   Survives any top overlay (browser extensions, Claude Preview MCP
+   toolbar, full-screen overlays) that might cover the topbar. */
+.floating-actions {
+  position: fixed;
+  bottom: calc(var(--action-bar-h) + var(--s-5));
+  left: var(--s-5);
+  display: flex; flex-direction: column; gap: var(--s-3);
+  z-index: 90;            /* above content, below modals */
+}
+.fab-btn {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  box-shadow: var(--e-2);
+  color: var(--c-text-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: all var(--d-fast) var(--ease-std);
+}
+.fab-btn:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border-color: var(--c-border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--e-3);
+}
+.fab-btn:active { transform: translateY(0); }
+.fab-btn .ico { width: 18px; height: 18px; }
+
+/* On mobile (action-bar takes less room) shrink + tighten the FAB stack */
+@media (max-width: 700px) {
+  .floating-actions {
+    bottom: calc(var(--action-bar-h) + var(--s-3));
+    left: var(--s-3);
+    gap: var(--s-2);
+  }
+  .fab-btn { width: 36px; height: 36px; }
+}
 
 /* ── kbd-help (bottom-right hint) ───────────────────────────────── */
 .kbd-help {
@@ -6417,9 +6836,10 @@ select { cursor: pointer; }
   #app {
     grid-template-columns: minmax(var(--tree-w-md), 280px) 1fr;
     grid-template-areas:
-      "topbar topbar"
-      "tree   center"
-      "action action";
+      "safetop safetop"
+      "topbar  topbar"
+      "tree    center"
+      "action  action";
   }
   .pdf-pane { display: none; }
   .pdf-pane.expand { display: flex; grid-column: 2; grid-area: center; }
@@ -6428,8 +6848,9 @@ select { cursor: pointer; }
 @media (max-width: 900px) {
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: var(--topbar-h) 240px 1fr auto;
+    grid-template-rows: var(--safe-top) var(--topbar-h) 240px 1fr auto;
     grid-template-areas:
+      "safetop"
       "topbar"
       "tree"
       "center"
@@ -6443,8 +6864,9 @@ select { cursor: pointer; }
   .mobile-tabs { display: flex; }
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: 44px 1fr auto;
+    grid-template-rows: var(--safe-top) 44px 1fr auto;
     grid-template-areas:
+      "safetop"
       "topbar"
       "tree"
       "action";
@@ -6760,17 +7182,23 @@ select { cursor: pointer; }
   margin-top: var(--s-6);
 }
 
-/* Topbar Settings dropdown (Sprint UI-2.5) */
+/* Topbar Settings dropdown (Sprint UI-2.5) — position: fixed escapes
+   the topbar's stacking context (z-index: 10 was clipped behind the
+   docked action-bar at z=60). JS positions it relative to the gear
+   button + clamps inside the viewport with extra clearance for
+   browser chrome / overlay extensions at the top. */
 .topbar-menu-btn { position: relative; }
 .topbar-menu {
-  position: absolute; top: calc(100% + 4px); right: 0;
-  min-width: 220px;
+  position: fixed;
+  min-width: 240px; max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 80px);   /* never overlap browser top bar */
+  overflow-y: auto;                  /* scroll if too tall */
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--r-lg);
-  box-shadow: var(--e-3);
+  box-shadow: var(--e-4);
   padding: 4px;
-  z-index: 250;
+  z-index: 350;       /* above modals (200), action-bar (60), sync-banner (150) */
   animation: menu-pop var(--d-fast) var(--ease-out);
   display: none;
 }
@@ -6918,8 +7346,15 @@ select { cursor: pointer; }
       </span>
       <button class="topbar-btn icon-only" onclick="toggleTheme()" title="สลับธีม light/dark" aria-label="สลับธีม light/dark" id="theme-toggle"><svg class="ico" aria-hidden="true"><use href="#i-moon"/></svg></button>
       <button class="topbar-btn" onclick="showLearning()" title="HITL learning"><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg><span>Learn</span></button>
+      <button class="topbar-btn" onclick="showSettings()" title="Settings"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
       <div class="topbar-menu-btn">
-        <button class="topbar-btn icon-only" onclick="toggleTopbarMenu(event)" title="More" aria-label="more actions" aria-haspopup="true"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg></button>
+        <button class="topbar-btn icon-only" onclick="toggleTopbarMenu(event)" title="More" aria-label="more actions" aria-haspopup="true">
+          <svg class="ico" aria-hidden="true" viewBox="0 0 24 24" stroke-width="2.4">
+            <circle cx="12" cy="5" r="1" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1" fill="currentColor"/>
+            <circle cx="12" cy="19" r="1" fill="currentColor"/>
+          </svg>
+        </button>
         <div class="topbar-menu" id="topbar-menu" role="menu">
           <button onclick="closeTopbarMenu();showAudit()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-chart"/></svg><span>Database &amp; Audit</span></button>
           <button onclick="closeTopbarMenu();showVersions()" role="menuitem"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-package"/></svg><span>Project versions</span></button>
@@ -7319,10 +7754,39 @@ select { cursor: pointer; }
           <option value="hi-contrast">High contrast</option>
         </select>
       </label>
-      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
-        <span><strong>LLM provider</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">For low-confidence Auto-annotate proposals</span></span>
-        <span id="settings-llm-status" style="font-family:var(--f-mono);font-size:var(--t-sm);padding:2px var(--s-3);border-radius:var(--r-sm);background:var(--c-surface-2)">off</span>
-      </label>
+      <div>
+        <strong>LLM provider — Anthropic Claude</strong>
+        <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block;margin-bottom:var(--s-3)">Claude refines low-confidence rule proposals · saves to <code>.env</code> (gitignored)</span>
+        <div id="settings-llm-card" style="background:var(--c-surface-2);border:1px solid var(--c-border);border-radius:var(--r-md);padding:var(--s-5);font-size:var(--t-sm);display:flex;flex-direction:column;gap:var(--s-4)">
+          <div id="settings-llm-status" style="font-family:var(--f-mono)">loading…</div>
+          <div style="display:flex;flex-direction:column;gap:var(--s-2)">
+            <label style="font-size:var(--t-sm);color:var(--c-text-muted);font-weight:600">API key</label>
+            <div style="display:flex;gap:var(--s-2)">
+              <input type="password" id="settings-api-key" placeholder="sk-ant-…" style="flex:1;font-family:var(--f-mono);font-size:var(--t-sm)" autocomplete="off" spellcheck="false">
+              <button class="btn" type="button" onclick="toggleApiKeyVisibility()" id="settings-api-key-toggle" title="show/hide" style="padding:6px var(--s-4)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-eye"/></svg></button>
+            </div>
+            <span style="font-size:var(--t-xs);color:var(--c-text-faint)">รับจาก <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style="color:var(--c-primary)">console.anthropic.com</a> · ห้ามแชร์ใน chat</span>
+          </div>
+          <div style="display:flex;gap:var(--s-3)">
+            <label style="flex:1;display:flex;flex-direction:column;gap:var(--s-2)">
+              <span style="font-size:var(--t-sm);color:var(--c-text-muted);font-weight:600">Model</span>
+              <select id="settings-model" style="font-family:var(--f-mono);font-size:var(--t-sm)">
+                <option value="claude-sonnet-4-5">Sonnet 4.5 (recommended, $3/M in)</option>
+                <option value="claude-opus-4-5">Opus 4.5 ($15/M in, edge cases)</option>
+                <option value="claude-haiku-4-5">Haiku 4.5 ($0.80/M in, fastest)</option>
+              </select>
+            </label>
+            <label style="width:120px;display:flex;flex-direction:column;gap:var(--s-2)">
+              <span style="font-size:var(--t-sm);color:var(--c-text-muted);font-weight:600">$/day cap</span>
+              <input type="number" id="settings-budget" min="0" step="0.5" value="5" style="font-family:var(--f-mono);font-size:var(--t-sm)">
+            </label>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:var(--s-3);margin-top:var(--s-2)">
+            <button class="btn btn-danger" type="button" onclick="clearApiKey()" id="settings-clear-key" style="font-size:var(--t-sm)">Clear key</button>
+            <button class="btn btn-primary" type="button" onclick="saveApiKey()" id="settings-save-key" style="font-size:var(--t-sm)"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-save"/></svg><span>Save &amp; activate</span></button>
+          </div>
+        </div>
+      </div>
       <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
         <span><strong>Reduce motion</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Disable animations &amp; transitions</span></span>
         <input type="checkbox" id="settings-reduce-motion" onchange="setReduceMotion(this.checked)" style="width:auto">
@@ -7330,6 +7794,17 @@ select { cursor: pointer; }
       <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
         <span><strong>Show keyboard hints</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Bottom-right shortcut overlay</span></span>
         <input type="checkbox" id="settings-show-kbd" onchange="setShowKbd(this.checked)" style="width:auto" checked>
+      </label>
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>Embedded mode</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Push topbar down 56px (Claude Preview, iframe, browser ext)</span></span>
+        <input type="checkbox" id="settings-embedded" onchange="setEmbeddedMode(this.checked)" style="width:auto">
+      </label>
+      <label style="display:flex;justify-content:space-between;align-items:center;gap:var(--s-4)">
+        <span><strong>Top inset (custom)</strong> <span style="color:var(--c-text-soft);font-size:var(--t-sm);display:block">Override pixel offset above topbar — adjust until your host's toolbar stops covering buttons</span></span>
+        <span style="display:inline-flex;align-items:center;gap:var(--s-3)">
+          <input type="range" id="settings-safe-top" min="0" max="120" step="4" value="0" oninput="setSafeTop(this.value)" style="width:140px">
+          <span id="settings-safe-top-val" style="font-family:var(--f-mono);font-size:var(--t-sm);width:40px;text-align:right">0px</span>
+        </span>
       </label>
       <div style="border-top:1px solid var(--c-divider);padding-top:var(--s-5);font-size:var(--t-sm);color:var(--c-text-soft)">
         <strong>Keyboard shortcuts</strong><br>
@@ -7414,6 +7889,20 @@ select { cursor: pointer; }
 
 <!-- Toast notifications (top-right) -->
 <div id="toasts" class="toast-stack" role="region" aria-live="polite" aria-label="notifications"></div>
+
+<!-- Always-on floating Settings access — survives any top-overlay (browser
+     extension / Claude Preview toolbar / etc.) covering the topbar. -->
+<div class="floating-actions" id="floating-actions">
+  <button class="fab-btn" onclick="openCmdK()" title="Command palette · ⌘K" aria-label="open command palette">
+    <svg class="ico" aria-hidden="true"><use href="#i-search"/></svg>
+  </button>
+  <button class="fab-btn" onclick="showSettings()" title="Settings" aria-label="settings">
+    <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
+  </button>
+  <button class="fab-btn" onclick="showOnboarding(true)" title="Help · ?" aria-label="help">
+    <svg class="ico" aria-hidden="true"><use href="#i-help"/></svg>
+  </button>
+</div>
 
 <aside class="kbd-help" aria-label="keyboard shortcuts">
   <span class="kbd-group"><span class="kbd">J</span><span class="kbd">K</span><span class="kbd-text">rows</span></span>
@@ -7732,7 +8221,7 @@ async function selectRow(rowNum, scroll = true) {
   if (scroll) {
     requestAnimationFrame(() => {
       const el = document.querySelector(`.tree-row[data-row="${rowNum}"]`);
-      if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
   }
 }
@@ -7760,7 +8249,7 @@ function updateTopbarContext(r) {
 function focusSelectedRow() {
   if (!SELECTED_ROW) return;
   const el = document.querySelector(`.tree-row[data-row="${SELECTED_ROW}"]`);
-  if (el) el.scrollIntoView({block: 'center', behavior: 'smooth'});
+  if (el) el.scrollIntoView({block: 'nearest', behavior: 'smooth'});
 }
 
 /* Walk the tree, find any node containing the row, expand all ancestors. */
@@ -8637,11 +9126,24 @@ function buildAnnotNode(a) {
   const g = document.createElementNS(NS, 'g');
   g.classList.add('annot');
   g.dataset.id = a._id;
-  if (a._id === SELECTED_ANN_ID) g.classList.add('selected');
+  const isSelected = (a._id === SELECTED_ANN_ID);
+  const isNew = !!a._isNew;
+  if (isSelected) g.classList.add('selected');
+  if (isNew) g.classList.add('is-new');
   const [x0, y0, x1, y1] = a.rect;
   const w = Math.max(0.5, x1 - x0);
   const h = Math.max(0.5, y1 - y0);
-  // Visible outline rect
+
+  // The page render NOW bakes in all existing annots (WYSIWYG with preview),
+  // so the SVG only needs to:
+  //   • show visible rect/text for NEWLY-drawn annots that aren't on disk yet
+  //     OR for the currently selected annot (drag/resize feedback)
+  //   • always provide an invisible hit area so click/hover/select work
+  //
+  // For existing annots in static view, ann-rect is rendered transparent
+  // (no double-rect with the baked image).
+
+  // Visible outline rect (transparent unless new/selected)
   const rect = document.createElementNS(NS, 'rect');
   rect.classList.add('ann-rect');
   if (a.type === 'FreeText') rect.classList.add('freetext');
@@ -8649,19 +9151,20 @@ function buildAnnotNode(a) {
   rect.setAttribute('width', w);
   rect.setAttribute('height', h);
   g.appendChild(rect);
-  // Hit area (slightly larger, transparent fill — enables click + hover)
+
+  // Hit area for click/hover/select
   const hit = document.createElementNS(NS, 'rect');
   hit.classList.add('ann-hit');
   hit.setAttribute('x', x0); hit.setAttribute('y', y0);
   hit.setAttribute('width', w);
   hit.setAttribute('height', h);
   g.appendChild(hit);
-  // FreeText label — render to match PyMuPDF's add_freetext_annot output
-  if (a.type === 'FreeText' && a.contents) {
+
+  // Visible text only for newly-drawn FreeText (baked image already has
+  // existing FreeText text; drawing again would show double).
+  if (isNew && a.type === 'FreeText' && a.contents) {
     const fontSize = freetextFontSize(a.rect);
     const lines = a.contents.split('\n');
-    // PyMuPDF insets text ~2pt from the rect edges; use hanging baseline so
-    // 'y' anchors at the TOP of the glyph box (mirrors PyMuPDF's text origin).
     const PAD_X = 2;
     const PAD_Y = 2;
     const lineH = fontSize * 1.15;
@@ -10852,18 +11355,75 @@ function showSettings() {
   // Sync current values
   const t = document.documentElement.getAttribute('data-theme') || '';
   document.getElementById('settings-theme').value = t;
-  // LLM status
-  fetch('/api/learn/stats').then(r => r.json()).then(j => {
-    const llm = (j.llm && j.llm.name) || 'off';
+  // LLM status — full Claude detail
+  fetch('/api/learn/llm_status').then(r => r.json()).then(j => {
     const el = document.getElementById('settings-llm-status');
-    if (el) el.textContent = llm;
-  }).catch(() => {});
+    if (!el) return;
+    if (!j.available || j.name === 'off') {
+      el.innerHTML = `<span style="color:var(--c-text-faint)">OFF — set ANTHROPIC_API_KEY + COMPLY_LLM=anthropic in .env to enable</span>`;
+      return;
+    }
+    const spentPct = j.budget_usd_per_day
+      ? Math.round((j.spent_today_usd || 0) / j.budget_usd_per_day * 100)
+      : 0;
+    const barColor = spentPct >= 90 ? 'var(--c-danger)'
+                   : spentPct >= 70 ? 'var(--c-warn)'
+                   : 'var(--c-success)';
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;margin-bottom:var(--s-2)">
+        <span style="color:var(--c-success-text);font-weight:600">● ${escapeHtml(j.model || j.name)}</span>
+        <span style="color:var(--c-text-soft)">${j.calls_today || 0} calls today</span>
+      </div>
+      <div style="margin-bottom:var(--s-2)">
+        <span style="color:var(--c-text-muted)">Tokens:</span>
+        in ${(j.tokens_in_today || 0).toLocaleString()} ·
+        out ${(j.tokens_out_today || 0).toLocaleString()} ·
+        cache ${(j.tokens_cache_read_today || 0).toLocaleString()}
+      </div>
+      <div style="margin-bottom:var(--s-2)">
+        <span style="color:var(--c-text-muted)">Budget:</span>
+        $${(j.spent_today_usd || 0).toFixed(3)} / $${(j.budget_usd_per_day || 0).toFixed(2)}
+        (${spentPct}%)
+      </div>
+      <div style="background:var(--c-surface-3);height:4px;border-radius:2px;overflow:hidden">
+        <div style="background:${barColor};height:100%;width:${Math.min(100, spentPct)}%;transition:width 0.3s"></div>
+      </div>`;
+  }).catch(() => {
+    const el = document.getElementById('settings-llm-status');
+    if (el) el.textContent = 'failed to load';
+  });
   // Reduce motion
   const rm = localStorage.getItem('comply-reduce-motion') === '1';
   document.getElementById('settings-reduce-motion').checked = rm;
   // Show kbd
   const showKbd = localStorage.getItem('comply-show-kbd') !== '0';
   document.getElementById('settings-show-kbd').checked = showKbd;
+  // Embedded mode (sync to current body attribute)
+  const embCb = document.getElementById('settings-embedded');
+  if (embCb) embCb.checked = document.body.getAttribute('data-embedded') === '1';
+  // Top inset slider
+  const stCur = document.body.style.getPropertyValue('--safe-top') ||
+                getComputedStyle(document.documentElement).getPropertyValue('--safe-top') || '0';
+  const stPx = parseInt(stCur) || 0;
+  const stInp = document.getElementById('settings-safe-top');
+  const stLbl = document.getElementById('settings-safe-top-val');
+  if (stInp) stInp.value = stPx;
+  if (stLbl) stLbl.textContent = stPx + 'px';
+  // Pre-fill model + budget from current llm_status
+  fetch('/api/learn/llm_status').then(r => r.json()).then(j => {
+    refreshLlmStatusCard(j);
+    const mSel = document.getElementById('settings-model');
+    const bInp = document.getElementById('settings-budget');
+    if (mSel && j.model) {
+      // Match model prefix (server returns full id like 'claude-sonnet-4-5-20250929')
+      for (const o of mSel.options) {
+        if (j.model.startsWith(o.value)) { mSel.value = o.value; break; }
+      }
+    }
+    if (bInp && typeof j.budget_usd_per_day === 'number') {
+      bInp.value = j.budget_usd_per_day;
+    }
+  });
   m.classList.add('show');
 }
 function closeSettings() { document.getElementById('settings-modal').classList.remove('show'); }
@@ -10902,17 +11462,66 @@ function dontShowOnboardingAgain() { try { localStorage.setItem('comply-onboarde
 function toggleTopbarMenu(e) {
   if (e) e.stopPropagation();
   const m = document.getElementById('topbar-menu');
-  m.classList.toggle('show');
   if (m.classList.contains('show')) {
-    setTimeout(() => document.addEventListener('click', _closeTopbarMenuOnDocClick), 0);
+    closeTopbarMenu();
+    return;
   }
+  // Position the fixed-position menu directly under the trigger button.
+  // The trigger is the .topbar-menu-btn or its child icon-button.
+  const trigger = document.querySelector('.topbar-menu-btn .topbar-btn')
+                || document.querySelector('.topbar-menu-btn');
+  if (trigger) {
+    const r = trigger.getBoundingClientRect();
+    // Show first so we can measure offsetWidth/Height
+    m.classList.add('show');
+    const W = m.offsetWidth || 240;
+    const H = m.offsetHeight || 240;
+    // Safe area: leave clearance for browser chrome / overlay bars that
+    // some users have at the top (translate bar, password manager bar).
+    const SAFE_TOP = 8;
+    const SAFE_BOTTOM = 8;
+    let left = r.right - W;                 // right-align with trigger
+    let top  = r.bottom + 4;                 // default: just below the gear
+    // Horizontal clamp
+    if (left < 8) left = 8;
+    if (left + W > window.innerWidth - 8) left = window.innerWidth - W - 8;
+    // Vertical clamp:
+    //   if not enough room below → flip above the trigger
+    //   if still not enough → clamp to safe-top with internal scroll
+    if (top + H > window.innerHeight - SAFE_BOTTOM) {
+      const above = r.top - H - 4;
+      if (above >= SAFE_TOP) {
+        top = above;
+      } else {
+        // Neither side has room — pin near top, content scrolls
+        top = SAFE_TOP;
+      }
+    }
+    if (top < SAFE_TOP) top = SAFE_TOP;
+    m.style.left = left + 'px';
+    m.style.top  = top  + 'px';
+  } else {
+    m.classList.add('show');
+  }
+  setTimeout(() => {
+    document.addEventListener('click', _closeTopbarMenuOnDocClick, true);
+    document.addEventListener('keydown', _closeTopbarMenuOnEsc, true);
+  }, 0);
 }
 function closeTopbarMenu() {
-  document.getElementById('topbar-menu').classList.remove('show');
-  document.removeEventListener('click', _closeTopbarMenuOnDocClick);
+  const m = document.getElementById('topbar-menu');
+  m.classList.remove('show');
+  m.style.left = ''; m.style.top = '';
+  document.removeEventListener('click', _closeTopbarMenuOnDocClick, true);
+  document.removeEventListener('keydown', _closeTopbarMenuOnEsc, true);
 }
 function _closeTopbarMenuOnDocClick(e) {
+  // Don't close when clicking inside the dropdown itself
+  if (e.target.closest('#topbar-menu')) return;
   if (!e.target.closest('.topbar-menu-btn')) closeTopbarMenu();
+}
+function _closeTopbarMenuOnEsc(e) {
+  if (e.key === 'Escape') { e.stopPropagation(); closeTopbarMenu(); }
 }
 
 // ── Wizard skill.md tip (Sprint S3.6) ──────────────────────────
@@ -11008,6 +11617,159 @@ if (localStorage.getItem('comply-show-kbd') === '0') {
   if (el) el.style.display = 'none';
 }
 
+// ── Embedded mode (auto-detect iframe / Claude Preview MCP overlay) ──
+// When the app runs inside an iframe (Claude Preview, embedded view,
+// etc.), there's typically a host toolbar overlapping the top ~48px.
+// We carve out --safe-top space so the topbar isn't covered.
+(function applyEmbeddedMode() {
+  let embedded;
+  const explicit = localStorage.getItem('comply-embedded');
+  if (explicit === '1' || explicit === '0') {
+    embedded = explicit === '1';
+  } else {
+    // Auto: in an iframe → assume yes
+    try {
+      embedded = (window.self !== window.top);
+    } catch (e) {
+      embedded = true;       // cross-origin iframe access throws
+    }
+  }
+  if (embedded) document.body.setAttribute('data-embedded', '1');
+})();
+function setEmbeddedMode(on) {
+  if (on) {
+    document.body.setAttribute('data-embedded', '1');
+    try { localStorage.setItem('comply-embedded', '1'); } catch (e) {}
+  } else {
+    document.body.removeAttribute('data-embedded');
+    try { localStorage.setItem('comply-embedded', '0'); } catch (e) {}
+  }
+}
+
+// Top safe-area pixel inset (overrides --safe-top via inline style on body)
+function setSafeTop(px) {
+  const v = Math.max(0, Math.min(200, parseInt(px) || 0));
+  if (v === 0) {
+    document.body.style.removeProperty('--safe-top');
+    try { localStorage.removeItem('comply-safe-top'); } catch (e) {}
+  } else {
+    document.body.style.setProperty('--safe-top', v + 'px');
+    try { localStorage.setItem('comply-safe-top', String(v)); } catch (e) {}
+  }
+  const lbl = document.getElementById('settings-safe-top-val');
+  if (lbl) lbl.textContent = v + 'px';
+}
+// Restore on boot
+(function _initSafeTop() {
+  try {
+    const saved = parseInt(localStorage.getItem('comply-safe-top'));
+    if (saved > 0) document.body.style.setProperty('--safe-top', saved + 'px');
+  } catch (e) {}
+})();
+
+// API key — show/hide + save + clear
+function toggleApiKeyVisibility() {
+  const inp = document.getElementById('settings-api-key');
+  if (!inp) return;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+async function saveApiKey() {
+  const inp = document.getElementById('settings-api-key');
+  const model = document.getElementById('settings-model').value;
+  const budget = parseFloat(document.getElementById('settings-budget').value);
+  const key = inp.value.trim();
+  if (!key) {
+    toast('Empty API key', 'พิมพ์ key ก่อน หรือกด Clear ถ้าต้องการล้าง', 'warn', 3000);
+    return;
+  }
+  if (!key.startsWith('sk-ant-')) {
+    toast('Invalid format', 'API key ต้องเริ่มด้วย sk-ant-', 'error', 4000);
+    return;
+  }
+  const btn = document.getElementById('settings-save-key');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `${ico('refresh',14)}<span>Saving…</span>`;
+  try {
+    const r = await fetch('/api/settings/api_key', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: key, model, budget_usd_per_day: budget}),
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      toast('Save failed', j.error || 'unknown', 'error', 5000);
+    } else {
+      toast(`✓ Claude activated`, `${j.status?.model || 'provider'} · budget $${(j.status?.budget_usd_per_day || 0).toFixed(2)}/day`, 'learn', 5000);
+      // Mask the key after save
+      inp.value = '••••••••' + key.slice(-4);
+      inp.type = 'password';
+      // Refresh status display
+      if (typeof showSettings === 'function') {
+        // Re-fetch status without reopening modal
+        fetch('/api/learn/llm_status').then(r => r.json()).then(refreshLlmStatusCard);
+      }
+    }
+  } catch (e) {
+    toast('Save error', e.message, 'error', 5000);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  }
+}
+async function clearApiKey() {
+  if (!confirm('ลบ API key ออกจาก .env? Claude provider จะปิดทันที')) return;
+  try {
+    const r = await fetch('/api/settings/api_key', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: ''}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('Key cleared', 'Claude provider ปิดแล้ว — rules-only mode', 'info', 3500);
+      const inp = document.getElementById('settings-api-key');
+      if (inp) { inp.value = ''; inp.type = 'password'; }
+      fetch('/api/learn/llm_status').then(r => r.json()).then(refreshLlmStatusCard);
+    } else {
+      toast('Clear failed', j.error || 'unknown', 'error', 4000);
+    }
+  } catch (e) { toast('Clear error', e.message, 'error', 4000); }
+}
+function refreshLlmStatusCard(j) {
+  const el = document.getElementById('settings-llm-status');
+  if (!el) return;
+  if (!j.available || j.name === 'off') {
+    el.innerHTML = `<span style="color:var(--c-text-faint)">OFF — paste API key below to enable</span>`;
+    return;
+  }
+  const spentPct = j.budget_usd_per_day
+    ? Math.round((j.spent_today_usd || 0) / j.budget_usd_per_day * 100)
+    : 0;
+  const barColor = spentPct >= 90 ? 'var(--c-danger)'
+                 : spentPct >= 70 ? 'var(--c-warn)'
+                 : 'var(--c-success)';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;margin-bottom:var(--s-2)">
+      <span style="color:var(--c-success-text);font-weight:600">● ${escapeHtml(j.model || j.name)}</span>
+      <span style="color:var(--c-text-soft)">${j.calls_today || 0} calls today</span>
+    </div>
+    <div style="margin-bottom:var(--s-2);font-size:var(--t-xs)">
+      <span style="color:var(--c-text-muted)">Tokens:</span>
+      in ${(j.tokens_in_today || 0).toLocaleString()} ·
+      out ${(j.tokens_out_today || 0).toLocaleString()} ·
+      cache ${(j.tokens_cache_read_today || 0).toLocaleString()}
+    </div>
+    <div style="margin-bottom:var(--s-2);font-size:var(--t-xs)">
+      <span style="color:var(--c-text-muted)">Budget:</span>
+      $${(j.spent_today_usd || 0).toFixed(3)} / $${(j.budget_usd_per_day || 0).toFixed(2)}
+      (${spentPct}%)
+    </div>
+    <div style="background:var(--c-surface-3);height:4px;border-radius:2px;overflow:hidden">
+      <div style="background:${barColor};height:100%;width:${Math.min(100, spentPct)}%;transition:width 0.3s"></div>
+    </div>`;
+}
+
 // ── Mobile: ensure topbar still has access via hamburger (UI-3.4) ──
 // At <700px the topbar is hidden; mobile-tabs has 3 tabs already.
 // Add a 4th tab "More" that toggles a drawer of Settings/Audit/Versions.
@@ -11074,6 +11836,23 @@ def boot() -> None:
     # Mirror everything into the DB so queries can hit it instead of the
     # in-memory caches.
     sync_db_from_memory()
+
+    # Load .env file (if present) so ANTHROPIC_API_KEY etc. are available
+    _load_dotenv(ROOT / ".env")
+
+    # Install Claude provider (no-op if key missing or COMPLY_LLM != 'anthropic')
+    try:
+        from app import anthropic_provider as ap
+        if ap.install_into_learning():
+            p = ap.get_provider()
+            bs = p.budget_status() if p else {}
+            print(f"[boot] Claude provider installed: model={bs.get('model')} "
+                  f"budget=${bs.get('budget_usd_per_day'):.2f}/day "
+                  f"spent_today=${bs.get('spent_today_usd', 0):.2f}")
+        else:
+            print(f"[boot] Claude provider OFF (set COMPLY_LLM=anthropic + ANTHROPIC_API_KEY to enable)")
+    except Exception as e:
+        sys.stderr.write(f"[boot] Claude install failed: {e}\n")
 
     # Always-load-latest invariant: ensure the latest snapshot reflects the
     # current working state, OR surface a divergence the user must resolve.

@@ -1,51 +1,9 @@
-# ── Python ────────────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# ── macOS / OS detritus ───────────────────────────────────────────
-.DS_Store
-.AppleDouble
-.LSOverride
-Icon?
-._*
-
-# ── Editor / IDE ──────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Secrets — NEVER commit
+.env
+.env.local
+*.key
+secrets.json
 
 # Claude Code local settings (per-machine; keep launch.json shared)
 **/.claude/settings.local.json
-
-# ── Excel / Office lock files ─────────────────────────────────────
-~$*
-*.tmp
-
-# ── Project: regenerable / heavy state ────────────────────────────
-# SQLite DB rebuilds from xlsx + filesystem on next boot
-_db/
-
-# Project-level snapshots have their own tooling (scripts/version.py)
-# and can be hundreds of MB per snapshot — never track in git.
-_versions/
-
-# Catalog PDFs (~250 MB of binary) — managed via _versions/, not git.
-# Keep flat files in output/ (the xlsx and verification_status.json),
-# but ignore every section subfolder + per-PDF history + archive.
-output/*/
-
-# ── Build / dist ──────────────────────────────────────────────────
-build/
-dist/
-*.egg-info/

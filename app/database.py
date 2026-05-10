@@ -261,6 +261,28 @@ CREATE TABLE IF NOT EXISTS learned_patterns (
 );
 CREATE INDEX IF NOT EXISTS idx_lp_type    ON learned_patterns(pattern_type);
 CREATE INDEX IF NOT EXISTS idx_lp_enabled ON learned_patterns(enabled);
+
+-- llm_calls: every Claude (or other LLM) API call's metrics, used for
+-- budget enforcement, cost analytics, and quality A/B over time.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    call_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               TIMESTAMP NOT NULL,
+    row_num          INTEGER,
+    model            TEXT,                  -- e.g. "claude-sonnet-4-5-20250929"
+    stop_reason      TEXT,                  -- end_turn / tool_use / max_tokens / ...
+    input_tokens     INTEGER DEFAULT 0,
+    output_tokens    INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    cache_read_tokens  INTEGER DEFAULT 0,
+    cost_usd         REAL DEFAULT 0,
+    elapsed_ms       INTEGER DEFAULT 0,
+    tool_calls_json  TEXT,                  -- JSON array of {name, input}
+    response_text    TEXT,                  -- truncated prose, if any
+    prompt_size_chars INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_ts    ON llm_calls(ts);
+CREATE INDEX IF NOT EXISTS idx_llm_row   ON llm_calls(row_num);
+CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_calls(model);
 """
 
 
